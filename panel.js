@@ -95,12 +95,20 @@ async function refreshWeaponlistAndReapply(retriesLeft = 5) {
         return refreshWeaponlistAndReapply(retriesLeft - 1);
     }
     if (!weapons || weapons.length === 0) {
-        console.log("panel: getWeapons() empty after mod load, giving up on weaponlist refresh");
+        // getWeapons() exists (meta.weapons was set) but stays empty after a
+        // real mod load — the weapon-ban hack is half-applied (e.g. the wlhl
+        // anchor drifted on a webliero re-minify). Bans silently won't work;
+        // flag it so the panel can warn the admin instead of failing quietly.
+        console.log("panel: getWeapons() empty after mod load — flagging weaponsError");
+        panelMetaRef.child('weaponsError').set(
+            'Weapon control is not responding on this room (getWeapons empty after a mod load). ' +
+            'Bans will not apply until the room is re-hosted with a working weapon build.');
         return;
     }
     let snapshot = weapons.map((w, i) => ({index: i, name: w.name}));
     panelWeaponlistRef.set(snapshot);
-    applyPanelWeaponsNode(lastWeaponsNode);
+    applyPanelWeaponsNode(lastWeaponsNode); // apply bans first — never let a metadata write block this
+    panelMetaRef.child('weaponsError').remove(); // recovered
 }
 
 function handlePanelWeaponsChange(snapshot) {

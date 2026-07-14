@@ -1,6 +1,19 @@
 let auth = new Map();
 var fdb;
 
+// Reverse lookup: auth-id -> current player id (auth Map is id -> auth).
+// Ported from buildinggame/_init.js; upstream webliero-simple referenced it
+// in removeAdmin (firebase.js) but never defined it, so !deladmin on an
+// online target threw a ReferenceError.
+function getPlayerIdFromAuth(a) {
+    for (const [k, p] of auth) {
+        if (p == a) {
+            return k
+        }
+    }
+    return null
+}
+
 var commentsRef;
 var notifsRef;
 
