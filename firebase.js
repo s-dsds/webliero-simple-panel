@@ -201,7 +201,8 @@ function writeLogins(p, type ="login") {
 
 function writeLog(p, msg) {
     const now = Date.now();
-    commentsRef.child(now).set({name: p.name, auth:auth.get(p.id), msg:msg, formatted:(new Date(now).toLocaleString())});
+    const day = new Date(now).toISOString().slice(0,10).replace(/-/g,'');
+    commentsRef.child(day).child(now).set({name: p.name, auth:auth.get(p.id), msg:msg, formatted:(new Date(now).toLocaleString())});
 }
 
 function writeGameStats(event, stats) {
