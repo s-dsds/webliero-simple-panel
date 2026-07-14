@@ -36,6 +36,10 @@ function writePanelMeta() {
     if (typeof window.WLROOM.getWeapons == 'function') {
         meta.weapons = true;
     }
+    // z_stats.js is part of this fork; advertise the Stats tab.
+    if (typeof statsRootRef !== 'undefined' || typeof initStats === 'function') {
+        meta.stats = 1;
+    }
     panelMetaRef.set(meta);
 }
 
