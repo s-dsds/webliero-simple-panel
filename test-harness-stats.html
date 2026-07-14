@@ -1,0 +1,116 @@
+<!DOCTYPE html><html><head><meta charset=utf-8></head><body><pre id="out"></pre>
+<script>
+// ---- stubs the fork globals z_stats.js depends on ----
+var CONFIG = { room_id: 'test', stats_elo_k: 32 };
+var baseRoomName = 'simple';
+var auth = new Map();
+function chainFunction(obj, attr, fn) {
+  const orig = obj[attr];
+  obj[attr] = function(){ if(orig) orig.apply(obj, arguments); return fn.apply(obj, arguments); };
+}
+// capture RTDB writes
+var CAPTURED = { updates: [], sets: [] };
+function fakeRef(path) {
+  return {
+    _p: path,
+    child: (c) => fakeRef(path + '/' + c),
+    once: () => Promise.resolve({ exists: () => false, val: () => null }),
+    set: (v) => { CAPTURED.sets.push({ path, v }); return Promise.resolve(); },
+    update: (o) => { CAPTURED.updates.push({ path, o }); return Promise.resolve(); },
+  };
+}
+var fdb = { ref: (p) => fakeRef(p) };
+var firebase = { database: { ServerValue: { increment: (n) => ({ __inc: n }) } } };
+
+// ---- stub WLROOM ----
+var _players = [];   // {id, name, team, score, kills, deaths}
+var WLROOM = {
+  getPlayerList: () => _players.map(p => ({ id: p.id, name: p.name, team: p.team, auth: p.auth })),
+  getPlayerScore: (id) => { var p = _players.find(x => x.id === id); return p ? { score: p.score, kills: p.kills, deaths: p.deaths } : null; },
+  getSettings: () => ({ level: 'arena.png' }),
+};
+window.WLROOM = WLROOM;
+function setPlayers(list) { _players = list; list.forEach(p => auth.set(p.id, p.auth)); }
+</script>
+<script src="z_stats.js"></script>
+<script>
+var out = [];
+function log(s){ out.push(s); }
+function assert(name, cond){ log((cond?'PASS ':'FAIL ')+name); }
+function lastUpdate(){ return CAPTURED.updates[CAPTURED.updates.length-1].o; }
+function inc(v){ return v && typeof v==='object' && '__inc' in v ? v.__inc : v; }
+
+(async () => {
+  // give initStats() its setTimeout(fdb ready) a tick — fdb is already set, so it runs sync-ish
+  await new Promise(r=>setTimeout(r,50));
+
+  // ===== Test 1: 4-player game, distinct scores =====
+  setPlayers([
+    {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},
+    {id:2,name:'Bob',  auth:'aB',team:1,score:0,kills:0,deaths:0},
+    {id:3,name:'Cara', auth:'aC',team:1,score:0,kills:0,deaths:0},
+    {id:4,name:'Dan',  auth:'aD',team:1,score:0,kills:0,deaths:0},
+  ]);
+  window.WLROOM.onGameStart();
+  await new Promise(r=>setTimeout(r,30)); // let seed reads resolve
+  // simulate a game: Alice 10 kills/score, Bob 6, Cara 3, Dan 1; deaths vary
+  _players[0].score=10; _players[0].kills=10; _players[0].deaths=2;
+  _players[1].score=6;  _players[1].kills=6;  _players[1].deaths=5;
+  _players[2].score=3;  _players[2].kills=3;  _players[2].deaths=7;
+  _players[3].score=1;  _players[3].kills=1;  _players[3].deaths=9;
+  CAPTURED.updates=[];
+  window.WLROOM.onGameEnd();
+  var u = lastUpdate();
+  assert('T1 one update() call for the game', CAPTURED.updates.length===1);
+  assert('T1 Alice games+1', inc(u['players/aA/games'])===1);
+  assert('T1 Alice wins+1 (rank1)', inc(u['players/aA/wins'])===1);
+  assert('T1 Bob no win', u['players/aB/wins']===undefined);
+  assert('T1 Alice kills delta=10', inc(u['players/aA/kills'])===10);
+  assert('T1 Alice placeSumNorm=1.0 (won, N=4)', Math.abs(inc(u['players/aA/placeSumNorm'])-1.0)<1e-9);
+  assert('T1 Dan placeSumNorm=0.0 (last)', Math.abs(inc(u['players/aD/placeSumNorm'])-0.0)<1e-9);
+  assert('T1 Cara placeSumNorm=1/3', Math.abs(inc(u['players/aC/placeSumNorm'])-(1/3))<1e-6);
+  // ELO: all four move; winner up, loser down; sum of deltas ~0
+  var eA=u['players/aA/elo'], eB=u['players/aB/elo'], eC=u['players/aC/elo'], eD=u['players/aD/elo'];
+  assert('T1 all four ELO written', [eA,eB,eC,eD].every(x=>typeof x==='number'));
+  assert('T1 winner ELO up', eA>1500);
+  assert('T1 loser ELO down', eD<1500);
+  var dsum=(eA-1500)+(eB-1500)+(eC-1500)+(eD-1500);
+  assert('T1 ELO deltas ~sum to 0 (±rounding)', Math.abs(dsum)<=4);
+  assert('T1 daily games+1', inc(u['daily/'+new Date().toISOString().slice(0,10).replace(/-/g,'')+'/games'])===1);
+  assert('T1 level count+1', Object.keys(u).some(k=>/^levels\/arena_png\/count$/.test(k)));
+
+  // ===== Test 2: tie for first → no win, shared rank =====
+  setPlayers([
+    {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},
+    {id:2,name:'Bob',  auth:'aB',team:1,score:0,kills:0,deaths:0},
+  ]);
+  window.WLROOM.onGameStart(); await new Promise(r=>setTimeout(r,20));
+  _players[0].score=5; _players[0].kills=5; _players[1].score=5; _players[1].kills=5;
+  CAPTURED.updates=[]; window.WLROOM.onGameEnd(); u=lastUpdate();
+  assert('T2 tie → neither wins', u['players/aA/wins']===undefined && u['players/aB/wins']===undefined);
+  assert('T2 tie placeSumNorm both 0.5', Math.abs(inc(u['players/aA/placeSumNorm'])-0.5)<1e-9 && Math.abs(inc(u['players/aB/placeSumNorm'])-0.5)<1e-9);
+
+  // ===== Test 3: mid-session joiner =====
+  setPlayers([
+    {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},
+    {id:2,name:'Bob',  auth:'aB',team:1,score:0,kills:0,deaths:0},
+  ]);
+  window.WLROOM.onGameStart(); await new Promise(r=>setTimeout(r,20));
+  // Cara joins mid-game
+  _players.push({id:3,name:'Cara',auth:'aC',team:1,score:0,kills:0,deaths:0});
+  auth.set(3,'aC');
+  window.WLROOM.onPlayerJoin({id:3,name:'Cara',auth:'aC',team:1});
+  _players[0].score=8; _players[0].kills=8; _players[1].score=4; _players[1].kills=4;
+  _players[2].score=3; _players[2].kills=3; // Cara got 3 kills mid-session
+  CAPTURED.updates=[]; window.WLROOM.onGameEnd(); u=lastUpdate();
+  assert('T3 Cara kills credited (activity)', inc(u['players/aC/kills'])===3);
+  assert('T3 Cara partialGames+1', inc(u['players/aC/partialGames'])===1);
+  assert('T3 Cara NOT in games', u['players/aC/games']===undefined);
+  assert('T3 Cara no ELO (ranked out)', u['players/aC/elo']===undefined);
+  assert('T3 Cara no placeSumNorm', u['players/aC/placeSumNorm']===undefined);
+  assert('T3 Alice still ranked (N=2 full)', typeof u['players/aA/elo']==='number' && inc(u['players/aA/games'])===1);
+
+  document.getElementById('out').textContent = out.join('\n') +
+    '\n\n' + out.filter(x=>x.startsWith('PASS')).length + ' PASS / ' + out.filter(x=>x.startsWith('FAIL')).length + ' FAIL';
+})();
+</script></body></html>

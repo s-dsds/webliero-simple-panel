@@ -3,7 +3,6 @@ var commentsRef;
 var notifsRef;
 var modsRef;
 var loginsRef;
-var statsRef;
 var adminsRef;
 var baseRoomName="simple";
 var admins = new Map();
@@ -205,7 +204,3 @@ function writeLog(p, msg) {
     commentsRef.child(day).child(now).set({name: p.name, auth:auth.get(p.id), msg:msg, formatted:(new Date(now).toLocaleString())});
 }
 
-function writeGameStats(event, stats) {
-  const now = Date.now();
-  statsRef.child(now).set({event: event, stats:stats});
-}
