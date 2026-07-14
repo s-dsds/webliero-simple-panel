@@ -1,0 +1,12 @@
+{
+  "name": "webliero-simple-panel-scripts",
+  "private": true,
+  "version": "1.0.0",
+  "description": "One-off Admin SDK migration scripts for webliero-simple-panel. Not part of the room-script bundle.",
+  "scripts": {
+    "migrate-comments": "node migrate-comments.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}
