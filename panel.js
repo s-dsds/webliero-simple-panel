@@ -45,7 +45,14 @@ async function getPanelModData(url) {
     }
     let data;
     try {
-        data = await (await fetch(url)).arrayBuffer();
+        let res = await fetch(url);
+        if (!res.ok) {
+            // a 404 (bad mod name) returns an HTML error page — never feed
+            // those bytes to loadMod, which throws parsing them as a zip
+            console.log("panel: mod fetch failed", res.status, url);
+            return null;
+        }
+        data = await res.arrayBuffer();
     } catch (e) {
         return null;
     }
