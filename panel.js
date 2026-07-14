@@ -85,21 +85,37 @@ async function handlePanelModChange(snapshot) {
         console.log("panel: mod could not be loaded", modUrl);
         return;
     }
+    // Snapshot the weapon-list signature BEFORE loadMod: getWeapons() keeps
+    // returning the OUTGOING mod's list for a moment after loadMod resolves,
+    // so we wait for it to actually change before snapshotting (otherwise the
+    // panel shows the previous mod's weapons). Verified live: a DooM→cs_rewormed
+    // switch briefly reported DooM's 8 weapons before cs_rewormed's 128 loaded.
+    let prevSig = typeof window.WLROOM.getWeapons == 'function' ? weaponSig(window.WLROOM.getWeapons()) : null;
+
     window.WLROOM.loadMod(data);
     lastAppliedModKey = modKey;
     console.log("panel: mod loaded", modUrl);
 
     if (typeof window.WLROOM.getWeapons == 'function') {
-        await refreshWeaponlistAndReapply();
+        await refreshWeaponlistAndReapply(15, prevSig);
     }
 }
 
-// the engine wipes the ban set on loadMod, so getWeapons() can be briefly empty right after
-async function refreshWeaponlistAndReapply(retriesLeft = 5) {
+// a cheap fingerprint of the weapon list to detect when a mod swap has landed
+function weaponSig(weapons) {
+    if (!weapons || weapons.length === 0) return "";
+    return weapons.length + ":" + weapons.map(function (w) { return w.name; }).join("|");
+}
+
+// After loadMod the weapon list is briefly still the outgoing mod's (or empty
+// while the engine clears bans). Retry until getWeapons() is non-empty AND its
+// signature differs from the pre-load list (prevSig), then snapshot + re-apply.
+async function refreshWeaponlistAndReapply(retriesLeft = 15, prevSig = null) {
     let weapons = window.WLROOM.getWeapons();
-    if ((!weapons || weapons.length === 0) && retriesLeft > 0) {
+    let stale = prevSig !== null && weaponSig(weapons) === prevSig;
+    if ((!weapons || weapons.length === 0 || stale) && retriesLeft > 0) {
         await new Promise((resolve) => setTimeout(resolve, 200));
-        return refreshWeaponlistAndReapply(retriesLeft - 1);
+        return refreshWeaponlistAndReapply(retriesLeft - 1, prevSig);
     }
     if (!weapons || weapons.length === 0) {
         // getWeapons() exists (meta.weapons was set) but stays empty after a

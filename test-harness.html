@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>panel-harness</title></head>
+<body>
+<pre id="results">PENDING</pre>
+<script>
+// ---- shared test infra ----
+window.__assertions = [];
+function assertEqual(name, actual, expected) {
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    const ok = a === e;
+    window.__assertions.push({name, ok, actual: a, expected: e});
+}
+function assertTrue(name, cond, detail) {
+    window.__assertions.push({name, ok: !!cond, actual: String(cond), expected: 'true', detail});
+}
+
+// ---- fake firebase ----
+const fakeRefs = new Map();
+function makeFakeRef(path) {
+    if (fakeRefs.has(path)) return fakeRefs.get(path);
+    const ref = {
+        path,
+        _listeners: {},
+        _onceVal: undefined,
+        _lastSet: undefined,
+        on(event, cb) { this._listeners[event] = cb; },
+        trigger(val) { if (this._listeners['value']) this._listeners['value']({val: () => val}); },
+        set(val) { this._lastSet = val; return Promise.resolve(); },
+        child(key) { return makeFakeRef(path + '/' + key); },
+        once(event) { return Promise.resolve({val: () => this._onceVal}); },
+    };
+    fakeRefs.set(path, ref);
+    return ref;
+}
+window.fdb = { ref: (path) => makeFakeRef(path) };
+
+// ---- room-script globals firebase.js/panel.js/moderation.js expect ----
+window.baseRoomName = "simple";
+window.CONFIG = { room_id: "test_room" };
+window.auth = new Map();
+
+window.chainFunction = (object, attribute, func) => {
+    const original = object[attribute];
+    if (original) {
+        object[attribute] = (...args) => {
+            let or = original.apply(object, args);
+            let r = func.apply(object, args);
+            if (false == r || false == or) return false;
+        };
+    } else {
+        object[attribute] = func;
+    }
+};
+
+window.COMMAND = { SUPER_ADMIN_ONLY: 2, ADMIN_ONLY: 1, FOR_ALL: 0 };
+window.__registeredCommands = {};
+window.COMMAND_REGISTRY = {
+    add: (name, usage, func, admin) => {
+        const names = typeof name == 'object' ? name : [name];
+        names.forEach((n) => { window.__registeredCommands[n] = { usage, func, admin }; });
+    },
+};
+
+window.COLORS = { ERROR: 0xFF0000, ANNOUNCE_BRIGHT: 0xf901eb };
+window.__announcements = [];
+window.announce = (msg, player, color) => { window.__announcements.push({msg, player, color}); };
+
+window.WLROOM = {
+    _weapons: [],
+    _bans: new Set(),
+    _kicked: [],
+    _players: [],
+    _loadedMod: null,
+    loadMod: (data) => { window.WLROOM._loadedMod = data; if (window.WLROOM._pendingWeapons) { window.WLROOM._weapons = window.WLROOM._pendingWeapons; window.WLROOM._pendingWeapons = null; } },
+    getWeapons: () => window.WLROOM._weapons,
+    banWeaponById: (id, ban) => { if (ban) window.WLROOM._bans.add(id); else window.WLROOM._bans.delete(id); },
+    banWeapon: (name, ban) => {
+        const w = window.WLROOM._weapons.find(w => w.name === name);
+        if (!w) return;
+        const i = window.WLROOM._weapons.indexOf(w);
+        if (ban) window.WLROOM._bans.add(i); else window.WLROOM._bans.delete(i);
+    },
+    unbanAllWeapons: () => { window.WLROOM._bans = new Set(); },
+    kickPlayer: (id, reason) => { window.WLROOM._kicked.push({id, reason}); },
+    getPlayer: (id) => window.WLROOM._players.find(p => p.id === id) || null,
+    getPlayerList: () => window.WLROOM._players,
+};
+
+// stub fetch used by panel.js's getPanelModData
+window.__fetchCalls = [];
+window.fetch = async (url) => {
+    window.__fetchCalls.push(url);
+    return { ok: true, arrayBuffer: async () => new Uint8Array([1,2,3]).buffer };
+};
+</script>
+
+<script src="file:///home/qmdev/liero/webliero-simple-panel/firebase.js"></script>
+<script src="file:///home/qmdev/liero/webliero-simple-panel/panel.js"></script>
+<script src="file:///home/qmdev/liero/webliero-simple-panel/moderation.js"></script>
+
+<script>
+(async function runTests() {
+  try {
+    // ---------------------------------------------------------------
+    // 1. mod node resolution order: url wins over name
+    // ---------------------------------------------------------------
+    assertEqual(
+        "resolvePanelModUrl: url wins when both present",
+        resolvePanelModUrl({url: "https://example.com/Custom.zip", name: "Jerac/DooM.zip"}),
+        "https://example.com/Custom.zip"
+    );
+    assertEqual(
+        "resolvePanelModUrl: name resolved against catalog base when url absent",
+        resolvePanelModUrl({name: "Jerac/DooM.zip"}),
+        "https://webliero.gitlab.io/webliero-mods/Jerac/DooM.zip"
+    );
+
+    // ---------------------------------------------------------------
+    // 2. onlyById ban computation
+    // ---------------------------------------------------------------
+    window.WLROOM._weapons = [
+        {name: "NAPALM"}, {name: "STEALTH MINE"}, {name: "NAPALM"}, {name: "GAUSS"}
+    ];
+    window.WLROOM._bans = new Set();
+    applyPanelWeaponsNode({onlyById: [1, 3]});
+    assertEqual(
+        "onlyById: bans every index NOT in the list",
+        Array.from(window.WLROOM._bans).sort(),
+        [0, 2]
+    );
+
+    // banById: bans exactly the given ids
+    window.WLROOM._bans = new Set();
+    applyPanelWeaponsNode({banById: [0, 2]});
+    assertEqual(
+        "banById: bans exactly the listed ids",
+        Array.from(window.WLROOM._bans).sort(),
+        [0, 2]
+    );
+
+    // absent node -> unban all
+    window.WLROOM._bans = new Set([0, 1, 2]);
+    applyPanelWeaponsNode(null);
+    assertEqual(
+        "weapons node absent -> unbanAllWeapons only",
+        Array.from(window.WLROOM._bans),
+        []
+    );
+
+    // legacy only (by name): banWeapon(name) hits the FIRST name match only (documented
+    // engine limitation, see spec "Weapon targeting"). With weapons [NAPALM, STEALTH MINE,
+    // NAPALM, GAUSS] and only=["STEALTH MINE"], the ban for index 2 (the second NAPALM)
+    // collapses onto index 0 (the first NAPALM) - index 2 itself is never banned. This
+    // is the exact duplicate-name bug the panel's id-based shapes exist to work around,
+    // preserved here only for legacy hand-edited nodes.
+    window.WLROOM._bans = new Set();
+    applyPanelWeaponsNode({only: ["STEALTH MINE"]});
+    assertEqual(
+        "legacy only (by name): first-match collapses duplicate-named weapon bans (documented limitation)",
+        Array.from(window.WLROOM._bans).sort(),
+        [0, 3]
+    );
+
+    // ---------------------------------------------------------------
+    // 3. mod listener end-to-end via the real .on('value') handler,
+    //    including the "don't reload if identical" + weaponlist snapshot + re-apply guard
+    // ---------------------------------------------------------------
+    // model a real mod swap: getWeapons returns the OLD list until loadMod runs,
+    // then the NEW list — exercises the stale-snapshot guard.
+    window.WLROOM._weapons = [{name: "OLD_A"}, {name: "OLD_B"}, {name: "OLD_C"}];
+    window.WLROOM._pendingWeapons = [{name: "BLOWTORCH"}, {name: "LAW"}];
+    window.WLROOM._bans = new Set();
+    lastAppliedModKey = null;
+    lastWeaponsNode = {banById: [1]};
+    window.__fetchCalls = [];
+
+    const modRef = fakeRefs.get("simple/test_room/mod");
+    modRef.trigger({url: "https://example.com/mod1.zip", setAt: 1, setBy: "op"});
+    await new Promise(r => setTimeout(r, 50));
+
+    assertTrue("mod listener: loadMod called", window.WLROOM._loadedMod !== null);
+    assertEqual("mod listener: fetched the resolved url", window.__fetchCalls, ["https://example.com/mod1.zip"]);
+    const weaponlistRef = fakeRefs.get("simple/test_room/weaponlist");
+    assertEqual(
+        "mod listener: weaponlist snapshot written as [{index,name}]",
+        weaponlistRef._lastSet,
+        [{index: 0, name: "BLOWTORCH"}, {index: 1, name: "LAW"}]
+    );
+    assertEqual(
+        "mod listener: weapons node re-applied after loadMod (Ck-clear guard)",
+        Array.from(window.WLROOM._bans),
+        [1]
+    );
+
+    // re-trigger with the SAME value -> should be a no-op (dedup on identical node)
+    const fetchCountBefore = window.__fetchCalls.length;
+    modRef.trigger({url: "https://example.com/mod1.zip", setAt: 1, setBy: "op"});
+    await new Promise(r => setTimeout(r, 50));
+    assertEqual(
+        "mod listener: identical re-fire is a no-op (no re-fetch)",
+        window.__fetchCalls.length,
+        fetchCountBefore
+    );
+
+    // ---------------------------------------------------------------
+    // 4. sharded writeLog key derivation (UTC boundaries)
+    // ---------------------------------------------------------------
+    const realDateNow = Date.now;
+    // commentsRef is only assigned inside initFirebase()'s async block in the real script,
+    // which we never invoke here (needs the live gstatic SDK) - wire it directly for the test.
+    // makeFakeRef (not fakeRefs.get) because nothing has touched this path yet.
+    commentsRef = makeFakeRef("simple/test_room/comments");
+
+    // 2024-01-01T23:59:59.999Z -> still day bucket 20240101 even though many
+    // local timezones would already show Jan 2 - this proves UTC, not local, boundary.
+    Date.now = () => Date.parse("2024-01-01T23:59:59.999Z");
+    writeLog({name: "alice"}, "hi");
+    assertTrue(
+        "writeLog: UTC day bucket just before midnight -> 20240101",
+        fakeRefs.get("simple/test_room/comments/20240101") !== undefined
+    );
+
+    // 2024-01-02T00:00:00.000Z -> rolls to 20240102
+    Date.now = () => Date.parse("2024-01-02T00:00:00.000Z");
+    writeLog({name: "bob"}, "yo");
+    assertTrue(
+        "writeLog: UTC day bucket right at midnight -> 20240102",
+        fakeRefs.get("simple/test_room/comments/20240102") !== undefined
+    );
+    assertTrue(
+        "writeLog: the two boundary writes land in DIFFERENT day buckets",
+        fakeRefs.get("simple/test_room/comments/20240101") !== fakeRefs.get("simple/test_room/comments/20240102")
+    );
+
+    Date.now = realDateNow;
+
+    // ---------------------------------------------------------------
+    // 5. moderation record shapes (kick / ban / unban)
+    // ---------------------------------------------------------------
+    window.WLROOM._players = [{id: 1, name: "Target", admin: false}, {id: 2, name: "Admin1", admin: true}];
+    window.auth.set(1, "authTarget");
+    window.auth.set(2, "authAdmin1");
+    window.WLROOM._kicked = [];
+
+    const moderationRef = fakeRefs.get("simple/test_room/moderation");
+
+    const kickCmd = window.__registeredCommands["kick"];
+    assertTrue("!kick command registered as ADMIN_ONLY", kickCmd && kickCmd.admin === window.COMMAND.ADMIN_ONLY);
+    kickCmd.func({id: 2, name: "Admin1"}, "Target", "being", "rude");
+
+    assertEqual("kick: kickPlayer called with target id + reason", window.WLROOM._kicked[0], {id: 1, reason: "being rude"});
+    const kickRecordKey = Array.from(fakeRefs.keys()).find(k => k.startsWith("simple/test_room/moderation/") && fakeRefs.get(k)._lastSet && fakeRefs.get(k)._lastSet.type === "kick");
+    const kickRecord = fakeRefs.get(kickRecordKey)._lastSet;
+    assertEqual(
+        "kick record shape",
+        {type: kickRecord.type, target: kickRecord.target, by: kickRecord.by, reason: kickRecord.reason, hasAt: typeof kickRecord.at === 'number', hasFormatted: typeof kickRecord.formatted === 'string'},
+        {type: "kick", target: {name: "Target", auth: "authTarget"}, by: {name: "Admin1", auth: "authAdmin1"}, reason: "being rude", hasAt: true, hasFormatted: true}
+    );
+
+    // ban with minutes -> expiresAt set; ban without minutes -> expiresAt null
+    window.WLROOM._kicked = [];
+    const banCmd = window.__registeredCommands["ban"];
+    banCmd.func({id: 2, name: "Admin1"}, "Target", "30", "spamming");
+    const banRecordKey = Array.from(fakeRefs.keys()).find(k => k.startsWith("simple/test_room/moderation/") && fakeRefs.get(k)._lastSet && fakeRefs.get(k)._lastSet.type === "ban");
+    const banRecord = fakeRefs.get(banRecordKey)._lastSet;
+    assertTrue("ban record: expiresAt is set when minutes given", typeof banRecord.expiresAt === 'number' && banRecord.expiresAt > Date.now());
+    assertEqual("ban record: reason captured after numeric minutes arg", banRecord.reason, "spamming");
+    assertTrue("ban: activeBans Map populated for target auth", activeBans.has("authTarget"));
+
+    // permanent ban (no minutes arg) -> expiresAt null
+    window.WLROOM._players.push({id: 3, name: "Target2", admin: false});
+    window.auth.set(3, "authTarget2");
+    banCmd.func({id: 2, name: "Admin1"}, "Target2", "griefing", "constantly");
+    const banRecordKey2 = Array.from(fakeRefs.keys()).filter(k => k.startsWith("simple/test_room/moderation/")).map(k => fakeRefs.get(k)).find(r => r._lastSet && r._lastSet.type === "ban" && r._lastSet.target.auth === "authTarget2")._lastSet;
+    assertEqual("permanent ban (no minutes): expiresAt is null", banRecordKey2.expiresAt, null);
+    assertEqual("permanent ban: reason is full remaining args joined", banRecordKey2.reason, "griefing constantly");
+
+    // unban
+    const unbanCmd = window.__registeredCommands["unban"];
+    unbanCmd.func({id: 2, name: "Admin1"}, "authTarget");
+    assertTrue("unban: removed from activeBans", !activeBans.has("authTarget"));
+    const unbanRecordKey = Array.from(fakeRefs.keys()).filter(k => k.startsWith("simple/test_room/moderation/")).map(k => fakeRefs.get(k)).find(r => r._lastSet && r._lastSet.type === "unban");
+    assertTrue("unban record persisted", !!unbanRecordKey);
+
+    // ---------------------------------------------------------------
+    // 6. ban-map rebuild from moderation node, chronological + expiry
+    // ---------------------------------------------------------------
+    activeBans.clear();
+    const now = Date.now();
+    const modLoadRef = fakeRefs.get("simple/test_room/moderation");
+    modLoadRef._onceVal = {
+        "100": {type: "ban", target: {name: "Old", auth: "authOld"}, by: {name: "Admin1", auth: "authAdmin1"}, at: 100, expiresAt: null},
+        "200": {type: "ban", target: {name: "Expired", auth: "authExpired"}, by: {name: "Admin1", auth: "authAdmin1"}, at: 200, expiresAt: now - 1000},
+        "150": {type: "ban", target: {name: "Renewed", auth: "authRenewed"}, by: {name: "Admin1", auth: "authAdmin1"}, at: 150, expiresAt: now + 1000},
+        "250": {type: "unban", target: {name: "Renewed", auth: "authRenewed"}, by: {name: "Admin1", auth: "authAdmin1"}, at: 250},
+    };
+    // exercise the REAL loadModerationOnce() (module-level moderationRef IS modLoadRef,
+    // since initModeration() already resolved it to this same cached fake ref on load)
+    assertTrue("sanity: moderationRef === the ref we seeded", moderationRef === modLoadRef);
+    loadModerationOnce();
+    await new Promise(r => setTimeout(r, 50));
+    assertTrue("ban-map rebuild: permanent ban stays active", activeBans.has("authOld"));
+    assertTrue("ban-map rebuild: already-expired ban is skipped", !activeBans.has("authExpired"));
+    assertTrue("ban-map rebuild: ban later cancelled by a chronologically-later unban is removed", !activeBans.has("authRenewed"));
+
+    // ---------------------------------------------------------------
+    // report
+    // ---------------------------------------------------------------
+    const failed = window.__assertions.filter(a => !a.ok);
+    const lines = window.__assertions.map(a => `${a.ok ? 'PASS' : 'FAIL'}  ${a.name}${a.ok ? '' : `  actual=${a.actual} expected=${a.expected}`}`);
+    lines.push('');
+    lines.push(`TOTAL ${window.__assertions.length}  PASS ${window.__assertions.length - failed.length}  FAIL ${failed.length}`);
+    document.getElementById('results').textContent = lines.join('\n');
+  } catch (e) {
+    document.getElementById('results').textContent = 'HARNESS ERROR: ' + e.message + '\n' + e.stack;
+  }
+})();
+</script>
+</body>
+</html>
