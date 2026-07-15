@@ -66,9 +66,50 @@ function initStats() {
         chainFunction(window.WLROOM, 'onPlayerKilled', statsOnKilled);
         console.log('stats: weapon/damage tracking enabled');
     }
+
+    // Live scoreboard: aggregates only flush at game end, so during a game the
+    // panel would look frozen. Write a small `live` node (current players +
+    // their in-game scores) every few seconds so viewers see the game as it
+    // happens. One whole-node overwrite per tick, only while a game runs.
+    setInterval(statsWriteLive, STATS_LIVE_MS);
+
     console.log('stats ok');
 }
 initStats();
+
+var STATS_LIVE_MS = 4000;
+var statsLiveWasRunning = false;
+function statsWriteLive() {
+    try {
+        if (!statsRootRef) return;
+        // "in progress" = there are non-spectator players right now. Derived
+        // from the live player list (not statsGameInProgress) so it survives a
+        // mid-game script reload and reflects reality directly.
+        var players = [];
+        for (var p of window.WLROOM.getPlayerList()) {
+            if (!p.team || p.team == 0) continue; // spectators excluded
+            var sc = window.WLROOM.getPlayerScore(p.id) || {};
+            players.push({
+                name: p.name, auth: auth.get(p.id) || null, team: p.team,
+                score: sc.score || 0, kills: sc.kills || 0, deaths: sc.deaths || 0
+            });
+        }
+        if (!players.length) {
+            if (statsLiveWasRunning) {
+                statsLiveWasRunning = false;
+                statsRootRef.child('live').set({ inProgress: false, ts: Date.now() });
+            }
+            return;
+        }
+        statsLiveWasRunning = true;
+        players.sort(function (a, b) { return b.score - a.score; });
+        statsRootRef.child('live').set({
+            inProgress: true, ts: Date.now(),
+            level: statsCurrentLevelName() || null,
+            players: players
+        });
+    } catch (e) {}
+}
 
 function statsOnJoin(player) {
     var a = player.auth || auth.get(player.id);
