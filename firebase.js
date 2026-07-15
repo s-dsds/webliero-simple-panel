@@ -70,6 +70,19 @@ function initFirebase() {
 function listenForAdminsEvents() {
     adminsRef.on('child_added', loadnewAdmin);
     adminsRef.on('child_changed', loadnewAdmin);
+    // Panel-driven removals (whole-node admins write) must demote live, not
+    // only at the next room restart.
+    adminsRef.on('child_removed', (childSnapshot) => {
+        const a = childSnapshot.key;
+        const rec = admins.get(a);
+        admins.delete(a);
+        const pid = getPlayerIdFromAuth(a);
+        if (pid) {
+            window.WLROOM.setPlayerAdmin(pid, false);
+        }
+        console.log("admin `" + a + "`: `" + (rec && rec.name) + "` has been removed from memory");
+        notifyAdmins("admin `" + a + "`: `" + (rec && rec.name) + "` has been removed");
+    });
 }
 
 function loadnewAdmin(childSnapshot) {
