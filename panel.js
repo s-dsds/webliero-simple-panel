@@ -22,6 +22,14 @@ function initPanel() {
     panelModRef.on('value', handlePanelModChange);
     panelWeaponsRef.on('value', handlePanelWeaponsChange);
 
+    // Publish the public join link so the panel (and the owner's room list)
+    // can link straight into the room. onRoomLink fires after registration —
+    // chain rather than replace so _init.js's console.log keeps working.
+    chainFunction(window.WLROOM, 'onRoomLink', (link) => {
+        window.panelRoomLink = link;
+        panelMetaRef.update({ roomlink: link, updatedAt: Date.now() });
+    });
+
     writePanelMeta();
     console.log('panel ok');
 }
@@ -39,6 +47,11 @@ function writePanelMeta() {
     // z_stats.js is part of this fork; advertise the Stats tab.
     if (typeof statsRootRef !== 'undefined' || typeof initStats === 'function') {
         meta.stats = 1;
+    }
+    // Survive a panel.js hot-reload: onRoomLink won't re-fire, so carry the
+    // link we already know instead of wiping it with the meta.set below.
+    if (window.panelRoomLink) {
+        meta.roomlink = window.panelRoomLink;
     }
     panelMetaRef.set(meta);
 }

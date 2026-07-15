@@ -68,6 +68,14 @@ function resolveNextMap() {
 
 function loadMapOrSubPool(mapName) {
     let mn = mapName ?? currentMapName
+    // Empty pool → resolveNextMap sets currentMapName=undefined; without this guard the
+    // substring below throws and the game-end rotation dies, wedging the room on the
+    // scoreboard forever (no map load → no restart → no onGameStart).
+    if (!mn) {
+        console.log("mappool: pool is empty, restarting on current level");
+        window.WLROOM.restartGame();
+        return;
+    }
     if (mn.substring(0,15)=="random#https://") {
         resolveNextSubPoolMap(mn)
     } else {
