@@ -60,10 +60,10 @@ function loadMap(name, data) {
 }
 
 function resolveNextMap() {
-    currentMap=currentMap+1<mypoolIdx.length?currentMap+1:0;    
+    currentMap=currentMap+1<mypoolIdx.length?currentMap+1:0;
     currentMapName = mypool[mypoolIdx[currentMap]];
     loadMapOrSubPool()
-
+    publishPoolState();
 }
 
 function loadMapOrSubPool(mapName) {
@@ -124,6 +124,68 @@ function next() {
 function shufflePool() {
     mypoolIdx = Object.keys(mypool);
     shuffleArray(mypoolIdx)
+    publishPoolState();
+}
+
+/** room-admin-panel: runtime play-order visibility + control.
+ * poolstate (room → panel): the CURRENT shuffled order + position — this is
+ * runtime state, distinct from the persisted pool node's order.
+ * poolctl (panel → room): one-shot commands, cleared after applying:
+ *   {action:"shuffle"} | {action:"setnext",index} | {action:"playnow",index}
+ * index refers to a position in the published poolstate.order. */
+var poolStateRef;
+var poolCtlRef;
+
+function initPoolPanel() {
+    if (typeof fdb == 'undefined' || !fdb) {
+        setTimeout(initPoolPanel, 200);
+        return;
+    }
+    poolStateRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolstate`);
+    poolCtlRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolctl`);
+    poolCtlRef.on('value', (snap) => {
+        const c = snap.val();
+        if (!c || !c.action) {
+            return;
+        }
+        poolCtlRef.set(null); // one-shot: consume before applying
+        applyPoolCtl(c);
+    });
+    publishPoolState();
+    console.log("poolpanel ok");
+}
+initPoolPanel();
+
+function publishPoolState() {
+    if (!poolStateRef) {
+        return;
+    }
+    poolStateRef.set({
+        order: mypoolIdx.map((k) => mypool[k] ?? null),
+        current: currentMap,
+        currentMapName: currentMapName || null,
+        updatedAt: Date.now()
+    });
+}
+
+function applyPoolCtl(c) {
+    if (c.action == "shuffle") {
+        shufflePool();
+        currentMap = 0;
+        publishPoolState();
+        notifyAdmins("map pool play order reshuffled (panel)");
+    } else if (c.action == "setnext" && typeof c.index == "number" && mypoolIdx.length) {
+        // next rotation lands on index: resolveNextMap advances by one first
+        currentMap = ((c.index - 1) + mypoolIdx.length) % mypoolIdx.length;
+        publishPoolState();
+        notifyAdmins(`next map set to ${mypool[mypoolIdx[c.index]]} (panel)`);
+    } else if (c.action == "playnow" && typeof c.index == "number" && mypoolIdx.length) {
+        currentMap = ((c.index) + mypoolIdx.length) % mypoolIdx.length;
+        currentMapName = mypool[mypoolIdx[currentMap]];
+        loadMapOrSubPool();
+        publishPoolState();
+        notifyAdmins(`map switched to ${currentMapName} (panel)`);
+    }
 }
 
 function shuffleArray(array) {
