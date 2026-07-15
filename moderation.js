@@ -5,7 +5,8 @@
  * summary node so the panel can show the authoritative active-ban list
  * without reading the unbounded log. */
 
-var activeBans = new Map(); // auth -> {name, auth, expiresAt, reason, at}
+var activeBans = new Map(); // auth -> {name, auth, conn, expiresAt, reason, at}
+var bannedConns = new Map(); // hex conn IP -> auth (autokick same-IP ban evaders)
 var moderationRef;
 var bansRef;
 var moderationBootAt = Date.now();
@@ -49,14 +50,32 @@ function applyModerationRecord(r, live) {
         if (r.expiresAt && r.expiresAt <= now) {
             return;
         }
-        activeBans.set(r.target.auth, {name: r.target.name || "", auth: r.target.auth, expiresAt: r.expiresAt ?? null, reason: r.reason || "", at: r.at});
+        // Panel bans carry no conn (the panel doesn't know it). If the target
+        // is online, backfill their IP now so same-IP autokick still works.
+        var banConn = r.target.conn || null;
+        if (!banConn) {
+            var online = findOnlinePlayersByAuth(r.target.auth)[0];
+            if (online) { banConn = conn.get(online.id) || null; }
+        }
+        activeBans.set(r.target.auth, {name: r.target.name || "", auth: r.target.auth, conn: banConn, expiresAt: r.expiresAt ?? null, reason: r.reason || "", at: r.at});
+        if (banConn) { bannedConns.set(banConn, r.target.auth); }
         if (live) {
-            // several connections can share one auth — kick them all
-            for (const p of findOnlinePlayersByAuth(r.target.auth)) {
+            // several connections can share one auth — kick them all, plus
+            // anyone on the banned IP (same-IP autokick).
+            var toKick = findOnlinePlayersByAuth(r.target.auth);
+            if (banConn) {
+                for (const p of findOnlinePlayersByConn(banConn)) {
+                    if (toKick.indexOf(p) < 0) { toKick.push(p); }
+                }
+            }
+            for (const p of toKick) {
                 window.WLROOM.kickPlayer(p.id, r.reason ? `banned: ${r.reason}` : "banned");
             }
         }
+        syncBansNode();
     } else if (r.type == "unban") {
+        var b = activeBans.get(r.target.auth);
+        if (b && b.conn) { bannedConns.delete(b.conn); }
         activeBans.delete(r.target.auth);
     } else if (r.type == "kick" && live) {
         for (const p of findOnlinePlayersByAuth(r.target.auth)) {
@@ -72,6 +91,13 @@ function findOnlinePlayersByAuth(a) {
     return window.WLROOM.getPlayerList().filter((p) => auth.get(p.id) == a);
 }
 
+function findOnlinePlayersByConn(c) {
+    if (!c) {
+        return [];
+    }
+    return window.WLROOM.getPlayerList().filter((p) => conn.get(p.id) == c);
+}
+
 // Mirror activeBans into the `bans` summary node (auth -> record). Whole-node
 // set: bans are few and this self-heals stale entries after expiry pruning.
 function syncBansNode() {
@@ -83,6 +109,7 @@ function syncBansNode() {
     for (const [a, rec] of activeBans) {
         if (rec.expiresAt && rec.expiresAt <= now) {
             activeBans.delete(a);
+            if (rec.conn) { bannedConns.delete(rec.conn); }
             continue;
         }
         out[a] = rec;
@@ -139,26 +166,39 @@ function doKick(byPlayer, targetPlayer, reason) {
 
 function doBan(byPlayer, targetPlayer, minutes, reason) {
     const targetAuth = auth.get(targetPlayer.id);
-    window.WLROOM.kickPlayer(targetPlayer.id, reason || "banned by admin");
+    const targetConn = conn.get(targetPlayer.id) || null;
     const now = Date.now();
     const expiresAt = minutes ? now + minutes * 60000 : null;
     const record = {
         type: "ban",
-        target: {name: targetPlayer.name, auth: targetAuth},
+        target: {name: targetPlayer.name, auth: targetAuth, conn: targetConn},
         by: {name: byPlayer.name, auth: auth.get(byPlayer.id)},
         reason: reason || "",
         at: now,
         formatted: (new Date(now).toLocaleString()),
         expiresAt: expiresAt
     };
-    activeBans.set(targetAuth, {name: targetPlayer.name, auth: targetAuth, expiresAt: expiresAt, reason: reason || "", at: now});
+    activeBans.set(targetAuth, {name: targetPlayer.name, auth: targetAuth, conn: targetConn, expiresAt: expiresAt, reason: reason || "", at: now});
+    if (targetConn) { bannedConns.set(targetConn, targetAuth); }
+    // kick the target AND any other connection sharing the banned IP
+    var toKick = findOnlinePlayersByAuth(targetAuth);
+    for (const p of findOnlinePlayersByConn(targetConn)) {
+        if (toKick.indexOf(p) < 0) { toKick.push(p); }
+    }
+    if (toKick.indexOf(targetPlayer) < 0) { toKick.push(targetPlayer); }
+    for (const p of toKick) {
+        window.WLROOM.kickPlayer(p.id, reason || "banned by admin");
+    }
     persistModeration(record);
+    syncBansNode();
     announce(`${targetPlayer.name} was banned${minutes ? " for " + minutes + " minutes" : " permanently"}${reason ? " (" + reason + ")" : ""}`, null, COLORS.ANNOUNCE_BRIGHT);
 }
 
 function doUnban(byPlayer, targetAuth) {
     const rec = activeBans.get(targetAuth);
+    if (rec && rec.conn) { bannedConns.delete(rec.conn); }
     activeBans.delete(targetAuth);
+    syncBansNode();
     const now = Date.now();
     const record = {
         type: "unban",
@@ -208,8 +248,15 @@ COMMAND_REGISTRY.add("unban", ["!unban <auth-or-name>: removes an active ban"], 
 }, COMMAND.ADMIN_ONLY);
 
 chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
-    const rec = activeBans.get(player.auth);
-    if (rec && (!rec.expiresAt || rec.expiresAt > Date.now())) {
+    const now = Date.now();
+    const notExpired = (rec) => rec && (!rec.expiresAt || rec.expiresAt > now);
+    // 1) direct auth ban
+    let rec = activeBans.get(player.auth);
+    // 2) same-IP autokick: a different auth on a banned connection (ban evasion)
+    if (!notExpired(rec) && player.conn && bannedConns.has(player.conn)) {
+        rec = activeBans.get(bannedConns.get(player.conn));
+    }
+    if (notExpired(rec)) {
         window.WLROOM.kickPlayer(player.id, rec.reason ? `banned: ${rec.reason}` : "banned");
     }
 });

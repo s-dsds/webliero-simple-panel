@@ -1,4 +1,5 @@
 let auth = new Map();
+let conn = new Map(); // player id -> hex-encoded connection IP (moderation autokick)
 var fdb;
 
 // Reverse lookup: auth-id -> current player id (auth Map is id -> auth).
