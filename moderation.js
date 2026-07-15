@@ -1,7 +1,15 @@
-/** room-admin-panel contract v1: !kick/!ban/!unban + join-time ban enforcement */
+/** room-admin-panel contract v1: !kick/!ban/!unban + join-time ban enforcement.
+ * The moderation node is an EVENT LOG (epoch-keyed records); the room replays
+ * it at boot and then keeps listening, so records appended by the admin PANEL
+ * (kick/ban/unban) apply live too. activeBans is mirrored into a `bans`
+ * summary node so the panel can show the authoritative active-ban list
+ * without reading the unbounded log. */
 
 var activeBans = new Map(); // auth -> {name, auth, expiresAt, reason, at}
 var moderationRef;
+var bansRef;
+var moderationBootAt = Date.now();
+var moderationReplayed = false;
 
 function initModeration() {
     if (typeof fdb == 'undefined' || !fdb) {
@@ -9,30 +17,77 @@ function initModeration() {
         return;
     }
     moderationRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/moderation`);
-    loadModerationOnce();
+    bansRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/bans`);
+    // Replay history, then stay subscribed: child_added fires in key order
+    // (epoch-ms keys), first for every existing record, then for each new one
+    // (panel writes included). Records older than boot only rebuild state;
+    // records appended after boot also enforce (kick the online target).
+    moderationRef.once('value').then((snapshot) => {
+        const v = snapshot.val() || {};
+        const records = Object.values(v).sort((a, b) => a.at - b.at);
+        for (const r of records) {
+            applyModerationRecord(r, false);
+        }
+        moderationReplayed = true;
+        syncBansNode();
+        console.log(`moderation: loaded ${activeBans.size} active ban(s)`);
+        moderationRef.orderByKey().startAt(String(moderationBootAt)).on('child_added', (snap) => {
+            const r = snap.val();
+            if (!r || !r.target) {
+                return;
+            }
+            applyModerationRecord(r, true);
+            syncBansNode();
+        });
+    });
 }
 initModeration();
 
-function loadModerationOnce() {
-    moderationRef.once('value').then((snapshot) => {
-        const v = snapshot.val();
-        if (!v) {
+function applyModerationRecord(r, live) {
+    const now = Date.now();
+    if (r.type == "ban") {
+        if (r.expiresAt && r.expiresAt <= now) {
             return;
         }
-        const records = Object.values(v).sort((a, b) => a.at - b.at);
-        const now = Date.now();
-        for (const r of records) {
-            if (r.type == "ban") {
-                if (r.expiresAt && r.expiresAt <= now) {
-                    continue;
-                }
-                activeBans.set(r.target.auth, {name: r.target.name, auth: r.target.auth, expiresAt: r.expiresAt, reason: r.reason, at: r.at});
-            } else if (r.type == "unban") {
-                activeBans.delete(r.target.auth);
+        activeBans.set(r.target.auth, {name: r.target.name || "", auth: r.target.auth, expiresAt: r.expiresAt ?? null, reason: r.reason || "", at: r.at});
+        if (live) {
+            // several connections can share one auth — kick them all
+            for (const p of findOnlinePlayersByAuth(r.target.auth)) {
+                window.WLROOM.kickPlayer(p.id, r.reason ? `banned: ${r.reason}` : "banned");
             }
         }
-        console.log(`moderation: loaded ${activeBans.size} active ban(s)`);
-    });
+    } else if (r.type == "unban") {
+        activeBans.delete(r.target.auth);
+    } else if (r.type == "kick" && live) {
+        for (const p of findOnlinePlayersByAuth(r.target.auth)) {
+            window.WLROOM.kickPlayer(p.id, r.reason || "kicked by admin");
+        }
+    }
+}
+
+function findOnlinePlayersByAuth(a) {
+    if (!a) {
+        return [];
+    }
+    return window.WLROOM.getPlayerList().filter((p) => auth.get(p.id) == a);
+}
+
+// Mirror activeBans into the `bans` summary node (auth -> record). Whole-node
+// set: bans are few and this self-heals stale entries after expiry pruning.
+function syncBansNode() {
+    if (!moderationReplayed) {
+        return;
+    }
+    const out = {};
+    const now = Date.now();
+    for (const [a, rec] of activeBans) {
+        if (rec.expiresAt && rec.expiresAt <= now) {
+            activeBans.delete(a);
+            continue;
+        }
+        out[a] = rec;
+    }
+    bansRef.set(out);
 }
 
 function persistModeration(record) {
