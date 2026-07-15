@@ -118,13 +118,14 @@ function applyModerationRecord(r, live) {
         registerBan(banKeyFor(r.target) || ("at:" + r.at), rec);
         if (live) {
             for (const p of onlinePlayersMatching(rec)) {
-                window.WLROOM.kickPlayer(p.id, rec.reason ? `banned: ${rec.reason}` : "banned");
+                banKick(p.id, rec.reason);
             }
         }
         syncBansNode();
     } else if (r.type == "unban") {
         // unban by whatever key the ban was stored under
         unregisterBan(banKeyFor(r.target) || "");
+        if (live) { try { window.WLROOM.clearBans(); } catch (e) {} }
     } else if (r.type == "kick" && live) {
         // targeted single kick: by auth if known, else by name
         var kicked = findOnlinePlayersByAuth(r.target.auth);
@@ -143,6 +144,13 @@ function onlinePlayersMatching(rec) {
     if (rec.conn) { findOnlinePlayersByConn(rec.conn).forEach(push); }
     if (rec.nameLower) { findOnlinePlayersByName(rec.name).forEach(push); }
     return out;
+}
+
+// A ban uses webliero's NATIVE ban (kickPlayer's 3rd arg = true) so the room
+// enforces it server-side too and it shows in the normal webliero admin UI —
+// not just our kick-on-join layer. A plain kick passes no ban flag.
+function banKick(id, reason) {
+    window.WLROOM.kickPlayer(id, reason ? `banned: ${reason}` : "banned", true);
 }
 
 function findOnlinePlayersByAuth(a) {
@@ -242,7 +250,7 @@ function doBanTarget(byPlayer, target, minutes, reason, announceName) {
     };
     registerBan(banKeyFor(target) || ("at:" + now), rec);
     for (const p of onlinePlayersMatching(rec)) {
-        window.WLROOM.kickPlayer(p.id, reason || "banned by admin");
+        banKick(p.id, reason);
     }
     persistModeration(record);
     syncBansNode();
@@ -263,6 +271,11 @@ function doBanName(byPlayer, name, minutes, reason) {
 
 function doUnban(byPlayer, key) {
     const rec = unregisterBan(key);
+    // Clear webliero's native bans, then let the custom layer re-cover the
+    // rest: our activeBans is the source of truth (it re-bans any still-banned
+    // player on their next join), so wiping all native bans here safely undoes
+    // just the one we removed without needing webliero's opaque per-ban key.
+    try { window.WLROOM.clearBans(); } catch (e) {}
     syncBansNode();
     const now = Date.now();
     persistModeration({
@@ -329,6 +342,6 @@ COMMAND_REGISTRY.add("unban", ["!unban <auth-or-name>: removes an active ban"], 
 chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
     const rec = matchActiveBan({auth: player.auth, conn: player.conn, name: player.name});
     if (rec) {
-        window.WLROOM.kickPlayer(player.id, rec.reason ? `banned: ${rec.reason}` : "banned");
+        banKick(player.id, rec.reason);
     }
 });
