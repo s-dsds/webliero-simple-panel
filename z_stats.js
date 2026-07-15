@@ -28,6 +28,21 @@ var statsWpnGlobal = new Map();    // fp -> {kills, damage, name}
 var statsWpnSeen = new Set();      // fps used this game (for weapons/<fp>/games)
 var statsLastHit = new Map();      // victim auth -> {fp, attacker auth} (kill attribution)
 
+// Kill feed + suicides (work on any build — onPlayerKilled is stock).
+var statsKillFeed = [];            // rolling recent kill events for the live board
+var STATS_FEED_CAP = 25;
+var statsSuicides = new Map();     // auth -> suicides this game
+// Timing metrics (need onPlayerSpawn — exact spawn times from the hacked build).
+var statsSpawnTime = new Map();    // player id -> ts of their current life's spawn
+var statsLastKill = new Map();     // killer id -> ts of their last kill this life
+var statsLifeSum = new Map();      // auth -> summed lifespan ms (spawn->death)
+var statsLifeCount = new Map();    // auth -> deaths counted for time-to-death
+var statsKillGapSum = new Map();   // auth -> summed kill->kill ms
+var statsKillGapCount = new Map(); // auth -> kill->kill intervals counted
+var statsSpawnKillSum = new Map(); // auth -> summed spawn->first-kill ms
+var statsSpawnKillCount = new Map();
+function statsMapAdd(m, k, v) { if (k) m.set(k, (m.get(k) || 0) + v); }
+
 function statsDayKey(ts) { return new Date(ts).toISOString().slice(0, 10).replace(/-/g, ''); }
 function statsInc(n) { return statsHasIncrement ? statsSV.increment(n) : n; } // fallback handled at flush
 function statsPend(auth, name) {
@@ -56,14 +71,17 @@ function initStats() {
     chainFunction(window.WLROOM, 'onPlayerTeamChange', statsOnTeamChange);
     chainFunction(window.WLROOM, 'onGameStart', statsOnGameStart);
     chainFunction(window.WLROOM, 'onGameEnd', statsOnGameEnd);
+    // onPlayerKilled is stock — kill feed, suicides and kill-timing work on any
+    // build. onPlayerSpawn is our injected callback (exact spawn times); on a
+    // build without it the timing maps just stay empty.
+    chainFunction(window.WLROOM, 'onPlayerKilled', statsOnKilled);
+    chainFunction(window.WLROOM, 'onPlayerSpawn', statsOnSpawn);
 
     // Phase 2: weapon effectiveness + damage, only on the weapon-enabled
-    // (hacked) build. onPlayerHit is our injected callback; onPlayerKilled
-    // attributes the kill to the victim's last-hit weapon.
+    // (hacked) build. onPlayerHit is our injected callback.
     statsWeaponsEnabled = typeof window.WLROOM.getWeapons === 'function';
     if (statsWeaponsEnabled) {
         chainFunction(window.WLROOM, 'onPlayerHit', statsOnHit);
-        chainFunction(window.WLROOM, 'onPlayerKilled', statsOnKilled);
         console.log('stats: weapon/damage tracking enabled');
     }
 
@@ -106,7 +124,8 @@ function statsWriteLive() {
         statsRootRef.child('live').set({
             inProgress: true, ts: Date.now(),
             level: statsCurrentLevelName() || null,
-            players: players
+            players: players,
+            feed: statsKillFeed.slice(-STATS_FEED_CAP) // recent kills for the feed
         });
     } catch (e) {}
 }
@@ -181,9 +200,22 @@ function statsOnGameStart() {
     statsDmgDealt.clear(); statsDmgTaken.clear();
     statsWpnByAuth.clear(); statsWpnGlobal.clear();
     statsWpnSeen.clear(); statsLastHit.clear();
+    // reset kill feed + suicide + timing accumulators
+    statsKillFeed.length = 0;
+    statsSuicides.clear();
+    statsSpawnTime.clear(); statsLastKill.clear();
+    statsLifeSum.clear(); statsLifeCount.clear();
+    statsKillGapSum.clear(); statsKillGapCount.clear();
+    statsSpawnKillSum.clear(); statsSpawnKillCount.clear();
+    var now = Date.now();
     for (var p of window.WLROOM.getPlayerList()) {
-        if (p.team && p.team != 0) statsAddParticipant(p, false);
-        if (p.team && p.team != 0 && !statsTeamSince.has(p.id)) statsTeamSince.set(p.id, Date.now());
+        if (p.team && p.team != 0) {
+            statsAddParticipant(p, false);
+            if (!statsTeamSince.has(p.id)) statsTeamSince.set(p.id, now);
+            // baseline spawn time: onPlayerSpawn fires on RESPAWN, so seed the
+            // first life here (game start) or timing would miss it.
+            statsSpawnTime.set(p.id, now);
+        }
     }
 }
 
@@ -229,23 +261,74 @@ function statsOnHit(attacker, victim, damage, weaponID) {
     if (vAuth) statsLastHit.set(vAuth, { fp: wf.fp, name: wf.name, attacker: aAuth });
 }
 
-// onPlayerKilled(killed, killer) has no weapon — attribute to the victim's
-// last-hit weapon (ffa-room model). Credit the KILLER (last hitter may differ
-// in crossfire — accepted imperfection), keyed on the victim's last weapon.
+// onPlayerSpawn(player) — injected callback. Marks the start of a life: record
+// the spawn time (time-to-death baseline) and reset the killer's per-life kill
+// clock so spawn->first-kill is measured from here.
+function statsOnSpawn(player) {
+    if (!player) return;
+    statsSpawnTime.set(player.id, Date.now());
+    statsLastKill.delete(player.id);
+}
+
+// onPlayerKilled(killed, killer). No weapon on the event — weapon comes from the
+// victim's last hit. Does four things: (1) weapon-kill attribution, (2) kill
+// feed, (3) suicide count, (4) timing (victim lifespan; killer spawn->kill and
+// kill->kill gaps).
 function statsOnKilled(killed, killer) {
-    if (!statsGameInProgress) return;
-    var vAuth = killed && auth.get(killed.id);
+    if (!statsGameInProgress || !killed) return;
+    var now = Date.now();
+    var vAuth = auth.get(killed.id);
     var kAuth = killer && auth.get(killer.id);
-    if (!vAuth) return;
+    var suicide = !killer || (killed.id === killer.id);
     var last = statsLastHit.get(vAuth);
-    if (!last) return;                 // no recorded hit (fall damage, etc.)
-    var creditAuth = kAuth || last.attacker;
-    if (!creditAuth) return;
-    var byAuth = statsWpnByAuth.get(creditAuth);
-    if (!byAuth) { byAuth = new Map(); statsWpnByAuth.set(creditAuth, byAuth); }
-    statsAddWpn(byAuth, last.fp, 1, 0, last.name);
-    statsAddWpn(statsWpnGlobal, last.fp, 1, 0, last.name);
-    statsLastHit.delete(vAuth);
+    var wname = last ? last.name : null;
+
+    // (1) weapon attribution — credit the killer (or last hitter) that weapon
+    if (last) {
+        var creditAuth = suicide ? vAuth : (kAuth || last.attacker);
+        if (creditAuth) {
+            var byAuth = statsWpnByAuth.get(creditAuth);
+            if (!byAuth) { byAuth = new Map(); statsWpnByAuth.set(creditAuth, byAuth); }
+            statsAddWpn(byAuth, last.fp, 1, 0, last.name);
+            statsAddWpn(statsWpnGlobal, last.fp, 1, 0, last.name);
+        }
+        statsLastHit.delete(vAuth);
+    }
+
+    // (2) kill feed (rolling, for the live board)
+    statsKillFeed.push({
+        ts: now, weapon: wname || (suicide ? "suicide" : null), suicide: suicide,
+        killer: suicide ? null : (killer ? killer.name : null),
+        victim: killed.name
+    });
+    if (statsKillFeed.length > STATS_FEED_CAP) statsKillFeed.shift();
+
+    // (3) suicides
+    if (suicide) statsMapAdd(statsSuicides, vAuth, 1);
+
+    // (4) timing — victim lifespan (spawn -> death)
+    var vs = statsSpawnTime.get(killed.id);
+    if (vAuth && vs) {
+        statsMapAdd(statsLifeSum, vAuth, now - vs);
+        statsMapAdd(statsLifeCount, vAuth, 1);
+    }
+    statsSpawnTime.delete(killed.id); // dead until next spawn event
+
+    // killer timing — spawn->first-kill this life, then kill->kill
+    if (!suicide && kAuth && killer) {
+        var lastKill = statsLastKill.get(killer.id);
+        if (lastKill) {
+            statsMapAdd(statsKillGapSum, kAuth, now - lastKill);
+            statsMapAdd(statsKillGapCount, kAuth, 1);
+        } else {
+            var ks = statsSpawnTime.get(killer.id);
+            if (ks) {
+                statsMapAdd(statsSpawnKillSum, kAuth, now - ks);
+                statsMapAdd(statsSpawnKillCount, kAuth, 1);
+            }
+        }
+        statsLastKill.set(killer.id, now);
+    }
 }
 
 function statsOnGameEnd() {
@@ -341,6 +424,20 @@ function statsOnGameEnd() {
         for (var fp of statsWpnSeen) updates[`weapons/${fp}/games`] = statsInc(1);
     }
 
+    // suicides + timing aggregates (kept as sum+count so avgs are exact across
+    // games). avg time-to-death = lifeSum/lifeCount, etc. Rendered by the panel.
+    for (var se of statsSuicides.entries()) if (se[1]) updates[`players/${se[0]}/suicides`] = statsInc(se[1]);
+    var timeMaps = [
+        ['lifeSum', statsLifeSum], ['lifeCount', statsLifeCount],
+        ['killGapSum', statsKillGapSum], ['killGapCount', statsKillGapCount],
+        ['spawnKillSum', statsSpawnKillSum], ['spawnKillCount', statsSpawnKillCount]
+    ];
+    for (var tm of timeMaps) {
+        for (var e2 of tm[1].entries()) {
+            if (e2[1]) updates[`players/${e2[0]}/${tm[0]}`] = statsInc(Math.round(e2[1]));
+        }
+    }
+
     // daily rollup + level usage
     updates[`daily/${day}/games`] = statsInc(1);
     updates[`daily/${day}/kills`] = statsInc(gameKills);
@@ -416,7 +513,7 @@ function statsUpdateNoIncrement(updates) {
     });
 }
 function statsIsCounterPath(p) {
-    return /\/(kills|deaths|scoreSum|joins|chat|games|partialGames|wins|placeSumNorm|playtime|count|uniquePlayers|damage|damageDealt|damageTaken)$/.test(p);
+    return /\/(kills|deaths|scoreSum|joins|chat|games|partialGames|wins|placeSumNorm|playtime|count|uniquePlayers|damage|damageDealt|damageTaken|suicides|lifeSum|lifeCount|killGapSum|killGapCount|spawnKillSum|spawnKillCount)$/.test(p);
 }
 function statsDeepGet(obj, path) {
     var parts = path.split('/'), o = obj;
