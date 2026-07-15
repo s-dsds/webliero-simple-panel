@@ -338,6 +338,14 @@ function statsOnGameEnd() {
     var day = statsDayKey(now);
     if (statsTodayKey !== day) { statsTodayKey = day; statsSeenToday.clear(); }
 
+    // Flush accrued playtime for players still on a team. Without this, a player
+    // who never leaves/spectates (e.g. a bot) never gets playtime credited,
+    // since statsFlushPlaytime otherwise only fires on leave/team-change.
+    for (var te of statsTeamSince.entries()) {
+        statsFlushPlaytime(te[0], te[1]);
+        statsTeamSince.set(te[0], now); // reset the timer for the next game
+    }
+
     // per-game deltas for every participant (full + mid-session)
     var parts = [];
     for (var pc of statsParticipants.values()) {
