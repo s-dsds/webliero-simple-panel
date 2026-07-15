@@ -3,6 +3,7 @@ var commentsRef;
 var notifsRef;
 var modsRef;
 var loginsRef;
+var playersRef;
 var adminsRef;
 var baseRoomName="simple";
 var admins = new Map();
@@ -45,6 +46,7 @@ function initFirebase() {
 		commentsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/comments`);
         notifsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/notifs`);
         loginsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/logins`);
+        playersRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/players`);
 
         adminsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/admins`);
         
@@ -195,7 +197,18 @@ COMMAND_REGISTRY.add("poolshuffle", ["!poolshuffle: shuffles map pool"], (player
 
 function writeLogins(p, type ="login") {
     const now = Date.now();
-    loginsRef.child(now).set({name: p.name, auth:auth.get(p.id), type:type, formatted:(new Date(now).toLocaleString())});
+    const a = auth.get(p.id);
+    loginsRef.child(now).set({name: p.name, auth:a, type:type, formatted:(new Date(now).toLocaleString())});
+    // Per-auth summary for the panel's player search: last seen + nickname
+    // history, O(players) instead of scanning the unbounded logins log.
+    if (type == "login" && a) {
+        const nameKey = String(p.name || "").replace(/[.#$\[\]\/]/g, "_").slice(0, 40) || "_";
+        playersRef.child(a).update({
+            name: p.name,
+            lastSeen: now,
+            ["names/" + nameKey]: now
+        });
+    }
 }
 
 function writeLog(p, msg) {
