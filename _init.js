@@ -55,6 +55,9 @@ const chainFunction = (object, attribute, func) => {
 	});
 	window.WLROOM = room;
 
-	room.onRoomLink = (link) => console.log(link);
+	// onRoomLink fires right after registration — BEFORE panel.js loads and
+	// can chain its own handler — so stash it globally here (the earliest
+	// handler) for panel.js's writePanelMeta to publish into meta.roomlink.
+	room.onRoomLink = (link) => { window.panelRoomLink = link; console.log(link); };
 	room.onCaptcha = () => console.log("Invalid token");
 })();
