@@ -17,6 +17,17 @@ var statsTeamSince = new Map();        // id -> epoch ms (playtime timer)
 var statsSeenToday = new Set();        // auths credited to daily uniques today
 var statsTodayKey = null;
 
+// Phase 2 (weapons/damage) — only active when the hacked headless build
+// exposes getWeapons()/onPlayerHit. Per-game in-memory accumulators, flushed
+// with everything else at game end.
+var statsWeaponsEnabled = false;
+var statsDmgDealt = new Map();     // auth -> damage dealt this game
+var statsDmgTaken = new Map();     // auth -> damage taken this game
+var statsWpnByAuth = new Map();    // auth -> Map(fp -> {kills, damage})
+var statsWpnGlobal = new Map();    // fp -> {kills, damage, name}
+var statsWpnSeen = new Set();      // fps used this game (for weapons/<fp>/games)
+var statsLastHit = new Map();      // victim auth -> {fp, attacker auth} (kill attribution)
+
 function statsDayKey(ts) { return new Date(ts).toISOString().slice(0, 10).replace(/-/g, ''); }
 function statsInc(n) { return statsHasIncrement ? statsSV.increment(n) : n; } // fallback handled at flush
 function statsPend(auth, name) {
@@ -45,6 +56,16 @@ function initStats() {
     chainFunction(window.WLROOM, 'onPlayerTeamChange', statsOnTeamChange);
     chainFunction(window.WLROOM, 'onGameStart', statsOnGameStart);
     chainFunction(window.WLROOM, 'onGameEnd', statsOnGameEnd);
+
+    // Phase 2: weapon effectiveness + damage, only on the weapon-enabled
+    // (hacked) build. onPlayerHit is our injected callback; onPlayerKilled
+    // attributes the kill to the victim's last-hit weapon.
+    statsWeaponsEnabled = typeof window.WLROOM.getWeapons === 'function';
+    if (statsWeaponsEnabled) {
+        chainFunction(window.WLROOM, 'onPlayerHit', statsOnHit);
+        chainFunction(window.WLROOM, 'onPlayerKilled', statsOnKilled);
+        console.log('stats: weapon/damage tracking enabled');
+    }
     console.log('stats ok');
 }
 initStats();
@@ -115,10 +136,75 @@ function statsSeedParticipant(a, id) {
 function statsOnGameStart() {
     statsGameInProgress = true;
     statsParticipants.clear();
+    // reset per-game weapon/damage accumulators
+    statsDmgDealt.clear(); statsDmgTaken.clear();
+    statsWpnByAuth.clear(); statsWpnGlobal.clear();
+    statsWpnSeen.clear(); statsLastHit.clear();
     for (var p of window.WLROOM.getPlayerList()) {
         if (p.team && p.team != 0) statsAddParticipant(p, false);
         if (p.team && p.team != 0 && !statsTeamSince.has(p.id)) statsTeamSince.set(p.id, Date.now());
     }
+}
+
+// --- Phase 2: weapon + damage accumulation ---
+
+// Stable per-weapon key from its name (mods reorder indices; the name is
+// stable). Falls back to name#id when a name is empty/duplicated.
+function statsWeaponFp(weaponID) {
+    var name = "";
+    try {
+        var w = window.WLROOM.getWeapon ? window.WLROOM.getWeapon(weaponID) : (window.WLROOM.getWeapons() || [])[weaponID];
+        if (w && w.name) name = String(w.name);
+    } catch (e) {}
+    var fp = name.trim().toUpperCase();
+    if (!fp) fp = "WEAPON#" + weaponID;
+    return { fp: statsSafeKey(fp), name: name || fp };
+}
+
+function statsAddWpn(map, key, kills, damage, name) {
+    var e = map.get(key);
+    if (!e) { e = { kills: 0, damage: 0, name: name }; map.set(key, e); }
+    e.kills += kills; e.damage += damage; if (name) e.name = name;
+    return e;
+}
+
+// injected onPlayerHit(attacker, victim, damage, weaponID) — player objects
+// carry .id (wrapper), so resolve auth via the auth map.
+function statsOnHit(attacker, victim, damage, weaponID) {
+    if (!statsGameInProgress || !(damage > 0)) return;
+    var aAuth = attacker && auth.get(attacker.id);
+    var vAuth = victim && auth.get(victim.id);
+    var wf = statsWeaponFp(weaponID);
+    statsWpnSeen.add(wf.fp);
+    if (vAuth) statsDmgTaken.set(vAuth, (statsDmgTaken.get(vAuth) || 0) + damage);
+    if (aAuth) {
+        statsDmgDealt.set(aAuth, (statsDmgDealt.get(aAuth) || 0) + damage);
+        var byAuth = statsWpnByAuth.get(aAuth);
+        if (!byAuth) { byAuth = new Map(); statsWpnByAuth.set(aAuth, byAuth); }
+        statsAddWpn(byAuth, wf.fp, 0, damage, wf.name);
+        statsAddWpn(statsWpnGlobal, wf.fp, 0, damage, wf.name);
+    }
+    // remember the victim's most-recent hit for kill attribution
+    if (vAuth) statsLastHit.set(vAuth, { fp: wf.fp, name: wf.name, attacker: aAuth });
+}
+
+// onPlayerKilled(killed, killer) has no weapon — attribute to the victim's
+// last-hit weapon (ffa-room model). Credit the KILLER (last hitter may differ
+// in crossfire — accepted imperfection), keyed on the victim's last weapon.
+function statsOnKilled(killed, killer) {
+    if (!statsGameInProgress) return;
+    var vAuth = killed && auth.get(killed.id);
+    var kAuth = killer && auth.get(killer.id);
+    if (!vAuth) return;
+    var last = statsLastHit.get(vAuth);
+    if (!last) return;                 // no recorded hit (fall damage, etc.)
+    var creditAuth = kAuth || last.attacker;
+    if (!creditAuth) return;
+    var byAuth = statsWpnByAuth.get(creditAuth);
+    if (!byAuth) { byAuth = new Map(); statsWpnByAuth.set(creditAuth, byAuth); }
+    statsAddWpn(byAuth, last.fp, 1, 0, last.name);
+    statsAddWpn(statsWpnGlobal, last.fp, 1, 0, last.name);
+    statsLastHit.delete(vAuth);
 }
 
 function statsOnGameEnd() {
@@ -188,6 +274,31 @@ function statsOnGameEnd() {
         if (pend.name) updates[`${b}/name`] = pend.name;
     }
     statsPending.clear();
+
+    // Phase 2: damage + per-weapon effectiveness (weapon-enabled build only)
+    if (statsWeaponsEnabled) {
+        for (var de of statsDmgDealt.entries()) {
+            if (de[1] > 0) updates[`players/${de[0]}/damageDealt`] = statsInc(Math.round(de[1]));
+        }
+        for (var te of statsDmgTaken.entries()) {
+            if (te[1] > 0) updates[`players/${te[0]}/damageTaken`] = statsInc(Math.round(te[1]));
+        }
+        for (var we of statsWpnByAuth.entries()) {
+            var wAuth = we[0];
+            for (var wf of we[1].entries()) {
+                var pb = `players/${wAuth}/weapons/${wf[0]}`;
+                if (wf[1].kills) updates[`${pb}/kills`] = statsInc(wf[1].kills);
+                if (wf[1].damage) updates[`${pb}/damage`] = statsInc(Math.round(wf[1].damage));
+            }
+        }
+        for (var ge of statsWpnGlobal.entries()) {
+            var gb = `weapons/${ge[0]}`;
+            updates[`${gb}/name`] = ge[1].name;
+            if (ge[1].kills) updates[`${gb}/kills`] = statsInc(ge[1].kills);
+            if (ge[1].damage) updates[`${gb}/damage`] = statsInc(Math.round(ge[1].damage));
+        }
+        for (var fp of statsWpnSeen) updates[`weapons/${fp}/games`] = statsInc(1);
+    }
 
     // daily rollup + level usage
     updates[`daily/${day}/games`] = statsInc(1);
@@ -264,7 +375,7 @@ function statsUpdateNoIncrement(updates) {
     });
 }
 function statsIsCounterPath(p) {
-    return /\/(kills|deaths|scoreSum|joins|chat|games|partialGames|wins|placeSumNorm|playtime|count|uniquePlayers)$/.test(p);
+    return /\/(kills|deaths|scoreSum|joins|chat|games|partialGames|wins|placeSumNorm|playtime|count|uniquePlayers|damage|damageDealt|damageTaken)$/.test(p);
 }
 function statsDeepGet(obj, path) {
     var parts = path.split('/'), o = obj;
