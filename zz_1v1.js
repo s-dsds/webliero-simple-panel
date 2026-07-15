@@ -5,6 +5,9 @@ chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
 		window.WLROOM.setPlayerAdmin(player.id, true);
 	}
 	auth.set(player.id, player.auth);
+	// conn = hex-encoded connection IP (moderation.js decodes it for
+	// same-IP autokick of ban-evaders on a different auth).
+	if (player.conn) { conn.set(player.id, player.conn); }
 	writeLogins(player);
 
 	announce(CONFIG.motd, player, 0xFF2222, "bold");
@@ -16,10 +19,11 @@ chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
 }
 )
 
-chainFunction(window.WLROOM, 'onPlayerLeave', function(player) {  
+chainFunction(window.WLROOM, 'onPlayerLeave', function(player) {
 	writeLogins(player, "logout");
 
 	auth.delete(player.id);
+	conn.delete(player.id);
 }
 )
 
