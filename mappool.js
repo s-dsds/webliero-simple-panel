@@ -37,6 +37,20 @@ async function getMapData(mapUrl) {
     return obj;
 }
 
+// Current level pixel dims. Tracked at load so the heatmap tracer (z_trace.js)
+// can size its grid to the real map — .lev is always 504x350, but PNG/raw maps
+// vary and worms outside a fixed 504x350 box would otherwise be clipped.
+var currentMapW = 504, currentMapH = 350;
+
+// Read width/height from a PNG's IHDR (sig 8 bytes, then width@16/height@20 BE).
+function pngDims(data) {
+    try {
+        var dv = data instanceof ArrayBuffer ? new DataView(data) : new DataView(data.buffer || data);
+        if (dv.getUint32(0) === 0x89504e47) return { w: dv.getUint32(16), h: dv.getUint32(20) };
+    } catch (e) {}
+    return null;
+}
+
 function loadMapByName(name) {
     console.log(name);
     (async () => {
@@ -44,9 +58,12 @@ function loadMapByName(name) {
         if (data == null) {
             notifyAdmins(`map ${name} could not be loaded`)
             window.WLROOM.restartGame();
-        } else if (name.split('.').pop()=="png") {    
+        } else if (name.split('.').pop()=="png") {
+            let d = pngDims(data);
+            currentMapW = d ? d.w : 504; currentMapH = d ? d.h : 350;
             window.WLROOM.loadPNGLevel(name, data);
         } else {
+            currentMapW = 504; currentMapH = 350; // classic .lev is fixed size
             window.WLROOM.loadLev(name, data);
         }
     })();
@@ -56,6 +73,7 @@ function loadMap(name, data) {
     console.log(data.data.length);
     console.log(data.data[2]);
     let buff=new Uint8Array(data.data).buffer;
+    currentMapW = data.x || 504; currentMapH = data.y || 350;
     window.WLROOM.loadRawLevel(name,buff, data.x, data.y);
 }
 
