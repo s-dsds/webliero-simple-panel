@@ -1,1 +1,3 @@
-_conf.js
+*-admins-export.json
+settings*.json
+pool_*.json
