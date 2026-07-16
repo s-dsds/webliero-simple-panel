@@ -61,9 +61,11 @@ function loadMapByName(name) {
         } else if (name.split('.').pop()=="png") {
             let d = pngDims(data);
             currentMapW = d ? d.w : 504; currentMapH = d ? d.h : 350;
+            currentMapName = name; // keep the name tied to the ACTUAL loaded map
             window.WLROOM.loadPNGLevel(name, data);
         } else {
             currentMapW = 504; currentMapH = 350; // classic .lev is fixed size
+            currentMapName = name;
             window.WLROOM.loadLev(name, data);
         }
     })();
