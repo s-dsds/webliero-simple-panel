@@ -81,7 +81,10 @@ function loadMap(name, data) {
 
 function resolveNextMap() {
     currentMap=currentMap+1<mypoolIdx.length?currentMap+1:0;
-    currentMapName = mypool[mypoolIdx[currentMap]];
+    let nn = mypool[mypoolIdx[currentMap]];
+    if (nn) currentMapName = nn; // keep the last valid name if the pool resolves empty
+                                 // (don't blank it — that wedged the map underlay
+                                 // and forced the empty-pool restart path)
     loadMapOrSubPool()
     publishPoolState();
 }

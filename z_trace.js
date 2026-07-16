@@ -31,6 +31,9 @@ var TRACE_FLUSH_MS = 3000;          // live-node write cadence
 var TRACE_RECENT_KEEP = 4;          // finished-game snapshots retained
 var TRACE_MAX_PTS = 600;            // path points/player before decimation
 var TRACE_MAX_MARKS = 60;           // cap spawn/death markers per player
+var TRACE_BREAK = -32768;           // path sentinel: lift the pen between lives
+                                    // (death -> respawn), so the trace isn't a
+                                    // straight teleport line across the map
 
 var TRACE_W = 504, TRACE_H = 350;
 function traceResolveDims() {
@@ -127,19 +130,32 @@ function traceSample() {
             r.name = p.name || r.name; r.team = p.team;
             if (pos.color != null) r.color = pos.color;
             var x = pos.x | 0, y = pos.y | 0;
+            if (r.pendingSpawn) {
+                // start of a new life: break the polyline so the previous
+                // death and this spawn aren't joined by a line, and record the
+                // spawn location.
+                if (r.path.length) r.path.push(TRACE_BREAK, TRACE_BREAK);
+                if (r.spts.length < TRACE_MAX_MARKS) r.spts.push([x, y]);
+                r.pendingSpawn = false;
+            }
             r.path.push(x, y); r.lastX = x; r.lastY = y;
-            if (r.pendingSpawn && r.spts.length < TRACE_MAX_MARKS) { r.spts.push([x, y]); r.pendingSpawn = false; }
             if (r.path.length > TRACE_MAX_PTS * 2) traceDecimate(r);
         }
-        if (!traceLevel) traceLevelName();
+        traceLevelName(); // keep level current (updates when currentMapName appears; sticky otherwise)
     } catch (e) {}
 }
 
 // Halve a path in place (keep every other point) when it gets too long, so the
 // wire size stays bounded on a long game.
 function traceDecimate(r) {
-    var out = [];
-    for (var i = 0; i < r.path.length; i += 4) { out.push(r.path[i], r.path[i + 1]); }
+    // Halve the path (keep every other real point) but ALWAYS keep the break
+    // sentinels, so life boundaries survive decimation.
+    var out = [], keep = true;
+    for (var i = 0; i + 1 < r.path.length; i += 2) {
+        if (r.path[i] === TRACE_BREAK) { out.push(TRACE_BREAK, TRACE_BREAK); keep = true; continue; }
+        if (keep) out.push(r.path[i], r.path[i + 1]);
+        keep = !keep;
+    }
     r.path = out;
 }
 
