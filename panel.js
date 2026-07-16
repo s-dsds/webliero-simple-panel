@@ -8,6 +8,7 @@ var panelWeaponlistRef;
 var panelMetaRef;
 var lastAppliedModKey = null;
 var lastWeaponsNode;
+var panelPendingMod = null; // mod node awaiting the next game start (applyAt:"nextGame")
 
 function initPanel() {
     if (typeof fdb == 'undefined' || !fdb) {
@@ -21,6 +22,16 @@ function initPanel() {
 
     panelModRef.on('value', handlePanelModChange);
     panelWeaponsRef.on('value', handlePanelWeaponsChange);
+
+    // Apply a postponed mod (applyAt:"nextGame") as the next game begins.
+    chainFunction(window.WLROOM, 'onGameStart', () => {
+        if (panelPendingMod) {
+            let v = panelPendingMod;
+            panelPendingMod = null;
+            console.log("panel: applying queued mod at game start:", v.url || v.name);
+            applyPanelMod(v);
+        }
+    });
 
     // Publish the public join link so the panel (and the owner's room list)
     // can link straight into the room. onRoomLink fires after registration —
@@ -92,6 +103,18 @@ async function handlePanelModChange(snapshot) {
     if (!v || (!v.url && !v.name)) {
         return;
     }
+    // Postpone-apply: when the panel sets applyAt:"nextGame", don't swap the mod
+    // mid-round (loadMod mid-game disrupts the active game). Stash it and apply
+    // on the next onGameStart edge. applyAt absent / "now" = apply immediately.
+    if (v.applyAt === 'nextGame' && (v.url || v.name) !== lastAppliedModKey) {
+        panelPendingMod = v;
+        console.log("panel: mod queued for next game start:", v.url || v.name);
+        return;
+    }
+    return applyPanelMod(v);
+}
+
+async function applyPanelMod(v) {
     let modKey = v.url || v.name;
     if (modKey === lastAppliedModKey) {
         return;
