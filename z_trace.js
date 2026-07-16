@@ -1,102 +1,115 @@
-// z_trace.js — worm-position tracing + heatmap (host-side).
+// z_trace.js — per-player worm-position tracing (host-side).
 //
-// The room host IS server-authoritative and holds every worm's live position,
-// so tracing runs right here in the fork — no observer bot, always-on for any
-// room running this script. Reverse-engineered live on the headless build:
+// The room host is server-authoritative and holds every worm's live position at
+// player.worm.ua.x/y (the client build calls the same slot `qa`; `ua.xa` is
+// health 0..100). This records a downsampled PATH per player plus spawn/death
+// points, and writes it to RTDB so the stats page can render BOTH a heatmap
+// (density) and a tracing view (polylines), and let the viewer show/hide
+// individual players — neither is possible from a pre-aggregated grid, hence
+// per-player storage.
 //
-//   player            = WLROOM.getPlayerList()[i]     (wrapper: {worm, name, team, id})
-//   player.worm       = the engine player record (Ra/ta/ia + score)
-//   player.worm.ua    = the WORM entity (minified `ua` on headless; the client
-//                       build calls the same slot `qa`). Fields:
-//                         .x, .y        pixel position (NOT minified; sub-pixel floats)
-//                         .xa           health 0..100 (0 / absent = dead)
-//                         .direction    facing, .ya = y-velocity, .fa = {x,y} rope hook
+//   simple/<roomId>/trace/live            refreshed while a game runs
+//   simple/<roomId>/trace/recent/<pushId> final snapshot per finished game (last few)
 //
-// Positions advance every game tick (verified: a worm walked 128,220 → 106,257
-// → 281,308 across samples). We accumulate a coarse density grid and write it to
-//   simple/<roomId>/trace/live            (refreshed while a game runs)
-//   simple/<roomId>/trace/recent/<pushId> (final snapshot per finished game)
-// ext-proxy's /stats/<room>/api/trace + the Heatmap tab render it over the map.
-// Wire format: base64 of little-endian Uint16 counts (see stats.html traceDecode).
+// Snapshot shape:
+//   { inProgress, ts, startTs, durationMs, level, w, h, cell, sampleMs,
+//     players: { "<id>": {
+//       name, team, color(int 0xRRGGBB), joinTs, leftTs|null, present,
+//       kills, deaths, score,               // from the live scoreboard
+//       path: "<base64 LE Int16 x,y pairs>",// downsampled positions
+//       spts: [[x,y],...],                  // spawn points
+//       dpts: [[x,y],...]                   // death points
+//     } } }
 //
-// NOTE: an alternate CLIENT tracer (bot-commander scripts/bots/tracer.js) writes
-// the same schema by reading ROOMOBJECT.Tb.W.B.qa on a spectator bot. Only ONE
-// writer per room — this host-side tracer is the default; don't also run the bot.
+// Keyed by player id: a player who leaves keeps their trace (leftTs set); a
+// joiner is added on first sight. Positions clamp to the map's real dims
+// (mappool.currentMapW/H) — maps aren't always 504x350.
 
-var TRACE_CELL = 7;                               // downsample factor (px per cell)
-// Map dims are resolved per-game from the loaded level (mappool.js tracks
-// currentMapW/currentMapH). Classic .lev is 504x350 but PNG/raw maps vary, so
-// these are NOT hardcoded — a fixed box would clip worms on a larger map.
+var TRACE_CELL = 7;                 // px per heatmap cell (client derives the grid)
+var TRACE_SAMPLE_MS = 250;          // position sample cadence
+var TRACE_FLUSH_MS = 3000;          // live-node write cadence
+var TRACE_RECENT_KEEP = 4;          // finished-game snapshots retained
+var TRACE_MAX_PTS = 600;            // path points/player before decimation
+var TRACE_MAX_MARKS = 60;           // cap spawn/death markers per player
+
 var TRACE_W = 504, TRACE_H = 350;
-var TRACE_GW = 72, TRACE_GH = 50;
 function traceResolveDims() {
     TRACE_W = (typeof currentMapW === 'number' && currentMapW > 0) ? currentMapW : 504;
     TRACE_H = (typeof currentMapH === 'number' && currentMapH > 0) ? currentMapH : 350;
-    TRACE_GW = Math.ceil(TRACE_W / TRACE_CELL);
-    TRACE_GH = Math.ceil(TRACE_H / TRACE_CELL);
 }
-var TRACE_SAMPLE_MS = 250;                        // position sample cadence
-var TRACE_FLUSH_MS = 3000;                        // live-node write cadence
-var TRACE_RECENT_KEEP = 4;                        // finished-game snapshots retained
 
 var traceRef = null;
-var traceGrid = null;        // Uint32Array(GW*GH) — aggregate visit density
-var traceSamples = 0;        // sample ticks that saw at least one worm
-var traceWormSamples = 0;    // total worm positions recorded
+var traceRecs = null;        // id -> per-player record
 var traceGameStart = 0;
-var traceLevel = null;
-var tracePlayers = null;     // key -> sample count (distinct-player estimate)
+var traceLevel = null;       // sticky: last non-empty level seen
 var traceSampleTimer = null;
 var traceFlushTimer = null;
+var traceRunning = false;
+
+function traceLevelName() {
+    var l = (typeof currentMapName === 'string' && currentMapName) ? currentMapName
+        : (statsCurrentLevelName ? statsCurrentLevelName() : null);
+    if (l) traceLevel = l;       // remember it so a transient empty doesn't blank the map
+    return traceLevel;
+}
 
 function initTrace() {
     if (typeof fdb == 'undefined' || !fdb) { setTimeout(initTrace, 200); return; }
     traceRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/trace`);
     chainFunction(window.WLROOM, 'onGameStart', traceOnGameStart);
     chainFunction(window.WLROOM, 'onGameEnd', traceOnGameEnd);
-    // A hot-reload can land mid-game; start sampling now so the live heatmap
-    // doesn't blank until the next onGameStart.
-    traceStartSampling();
+    chainFunction(window.WLROOM, 'onPlayerSpawn', traceOnSpawn);
+    chainFunction(window.WLROOM, 'onPlayerKilled', traceOnKilled);
+    chainFunction(window.WLROOM, 'onPlayerLeave', traceOnLeave);
+    traceStartSampling(); // a hot-reload can land mid-game
     console.log('trace ok');
 }
 
-function traceNewGrid() { return new Uint32Array(TRACE_GW * TRACE_GH); }
-
-// traceWormXY resolves a player wrapper to its worm's pixel position, or null
-// if the player has no live in-bounds worm (spectator, dead, not spawned).
-function traceWormXY(p) {
-    if (!p || !p.team || p.team == 0) return null;   // spectators excluded
-    var w = p.worm && p.worm.ua;                       // the worm entity
-    if (!w) return null;
-    if (typeof w.xa == 'number' && w.xa <= 0) return null; // dead (health 0)
-    var x = w.x, y = w.y;
-    if (typeof x != 'number' || typeof y != 'number') return null;
-    if (!isFinite(x) || !isFinite(y)) return null;
-    if (x < 0 || y < 0 || x >= TRACE_W || y >= TRACE_H) return null;
-    return { x: x, y: y };
+function traceNewRun() {
+    traceResolveDims();
+    traceRecs = {};
+    traceGameStart = Date.now();
+    traceLevelName();
 }
 
-// Prefer the fork's currentMapName (the actual loaded level); getSettings has
-// no current-level field on the headless build.
-function traceLevelName() {
-    if (typeof currentMapName === 'string' && currentMapName) return currentMapName;
-    return statsCurrentLevelName ? statsCurrentLevelName() : null;
+function traceKey(p) { return String(p.id); }
+
+function traceRec(p) {
+    var k = traceKey(p);
+    var r = traceRecs[k];
+    if (!r) {
+        r = {
+            name: p.name || '?', team: p.team || 0, color: 0xffffff,
+            joinTs: Date.now(), leftTs: null, present: true,
+            kills: 0, deaths: 0, score: 0,
+            path: [], spts: [], dpts: [], lastX: null, lastY: null,
+            pendingSpawn: true // capture the first sampled position as a spawn point
+        };
+        traceRecs[k] = r;
+    }
+    return r;
+}
+
+function traceWormXY(p) {
+    var w = p && p.worm && p.worm.ua;
+    if (!w) return null;
+    if (typeof w.xa == 'number' && w.xa <= 0) return null; // dead
+    var x = w.x, y = w.y;
+    if (typeof x != 'number' || typeof y != 'number' || !isFinite(x) || !isFinite(y)) return null;
+    if (x < 0 || y < 0 || x >= TRACE_W || y >= TRACE_H) return null;
+    return { x: x, y: y, color: (typeof w.color == 'number' ? w.color : null) };
 }
 
 function traceStartSampling() {
     if (traceSampleTimer) return;
-    if (!traceGrid) {
-        traceResolveDims();
-        traceGrid = traceNewGrid();
-        traceSamples = 0; traceWormSamples = 0;
-        traceGameStart = Date.now(); tracePlayers = {};
-        traceLevel = traceLevelName();
-    }
+    if (!traceRecs) traceNewRun();
+    traceRunning = true;
     traceSampleTimer = setInterval(traceSample, TRACE_SAMPLE_MS);
     traceFlushTimer = setInterval(traceFlushLive, TRACE_FLUSH_MS);
 }
 
 function traceStopSampling() {
+    traceRunning = false;
     if (traceSampleTimer) { clearInterval(traceSampleTimer); traceSampleTimer = null; }
     if (traceFlushTimer) { clearInterval(traceFlushTimer); traceFlushTimer = null; }
 }
@@ -104,93 +117,140 @@ function traceStopSampling() {
 function traceSample() {
     try {
         var list = window.WLROOM.getPlayerList();
-        var any = false;
         for (var i = 0; i < list.length; i++) {
             var p = list[i];
+            if (!p.team || p.team == 0) continue; // spectators
             var pos = traceWormXY(p);
             if (!pos) continue;
-            var gx = (pos.x / TRACE_CELL) | 0, gy = (pos.y / TRACE_CELL) | 0;
-            traceGrid[gy * TRACE_GW + gx]++;
-            traceWormSamples++;
-            any = true;
-            var key = p.auth || (auth && auth.get(p.id)) || p.name;
-            if (key) tracePlayers[key] = (tracePlayers[key] || 0) + 1;
+            var r = traceRec(p);
+            r.present = true; r.leftTs = null;
+            r.name = p.name || r.name; r.team = p.team;
+            if (pos.color != null) r.color = pos.color;
+            var x = pos.x | 0, y = pos.y | 0;
+            r.path.push(x, y); r.lastX = x; r.lastY = y;
+            if (r.pendingSpawn && r.spts.length < TRACE_MAX_MARKS) { r.spts.push([x, y]); r.pendingSpawn = false; }
+            if (r.path.length > TRACE_MAX_PTS * 2) traceDecimate(r);
         }
-        if (any) {
-            traceSamples++;
-            if (!traceLevel && statsCurrentLevelName) traceLevel = statsCurrentLevelName();
-        }
+        if (!traceLevel) traceLevelName();
     } catch (e) {}
 }
 
-// traceEncode packs the grid as base64 of a little-endian Uint16 array (counts
-// clamped to 65535). 72*50 cells -> 7200 bytes -> ~9.6 KB base64: one small,
-// fixed-size field regardless of game length or player count.
-function traceEncode(grid) {
-    var n = grid.length;
-    var u16 = new Uint16Array(n);
-    for (var i = 0; i < n; i++) u16[i] = grid[i] > 65535 ? 65535 : grid[i];
-    var bytes = new Uint8Array(u16.buffer);
-    var bin = '';
-    for (var j = 0; j < bytes.length; j += 8192) {
-        bin += String.fromCharCode.apply(null, bytes.subarray(j, j + 8192));
-    }
+// Halve a path in place (keep every other point) when it gets too long, so the
+// wire size stays bounded on a long game.
+function traceDecimate(r) {
+    var out = [];
+    for (var i = 0; i < r.path.length; i += 4) { out.push(r.path[i], r.path[i + 1]); }
+    r.path = out;
+}
+
+function traceOnSpawn(player) {
+    try {
+        if (!traceRunning || !player) return;
+        var r = traceRec(player);
+        var pos = traceWormXY(player);
+        // The worm's position often isn't set yet at the spawn callback, so mark
+        // it pending and let the next sample record the actual spawn location.
+        if (pos && r.spts.length < TRACE_MAX_MARKS) r.spts.push([pos.x | 0, pos.y | 0]);
+        else r.pendingSpawn = true;
+    } catch (e) {}
+}
+
+function traceOnKilled(killed) {
+    try {
+        if (!traceRunning || !killed) return;
+        var r = traceRecs[traceKey(killed)];
+        if (!r) return;
+        // worm may already be gone; use the last sampled position
+        var pos = traceWormXY(killed);
+        var x = pos ? pos.x | 0 : r.lastX, y = pos ? pos.y | 0 : r.lastY;
+        if (x != null && y != null && r.dpts.length < TRACE_MAX_MARKS) r.dpts.push([x, y]);
+    } catch (e) {}
+}
+
+function traceOnLeave(player) {
+    try {
+        if (!player) return;
+        var r = traceRecs[traceKey(player)];
+        if (r) { r.present = false; r.leftTs = Date.now(); } // keep the trace
+    } catch (e) {}
+}
+
+// base64 of a little-endian Int16 array (matches stats.html traceDecodePath).
+function tracePackPath(arr) {
+    var n = arr.length, i16 = new Int16Array(n);
+    for (var i = 0; i < n; i++) { var v = arr[i]; i16[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
+    var bytes = new Uint8Array(i16.buffer), bin = '';
+    for (var j = 0; j < bytes.length; j += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(j, j + 8192));
     return btoa(bin);
 }
 
+function traceRefreshStats() {
+    // Pull current-game kills/deaths/score for players still present.
+    try {
+        for (var k in traceRecs) {
+            var r = traceRecs[k];
+            if (!r.present) continue;
+            var sc = window.WLROOM.getPlayerScore(+k);
+            if (sc) { r.kills = sc.kills || 0; r.deaths = sc.deaths || 0; r.score = sc.score || 0; }
+        }
+    } catch (e) {}
+}
+
 function traceSnapshot(inProgress) {
+    traceRefreshStats();
+    var players = {};
+    var count = 0;
+    for (var k in traceRecs) {
+        var r = traceRecs[k];
+        if (!r.path.length && !r.spts.length) continue;
+        players[k] = {
+            name: r.name, team: r.team, color: r.color,
+            joinTs: r.joinTs, leftTs: r.leftTs, present: !!r.present,
+            kills: r.kills, deaths: r.deaths, score: r.score,
+            path: tracePackPath(r.path), spts: r.spts, dpts: r.dpts
+        };
+        count++;
+    }
     return {
-        inProgress: !!inProgress,
-        ts: Date.now(),
-        startTs: traceGameStart,
+        inProgress: !!inProgress, ts: Date.now(), startTs: traceGameStart,
         durationMs: Date.now() - traceGameStart,
-        level: traceLevel || (statsCurrentLevelName ? statsCurrentLevelName() : null) || null,
-        gw: TRACE_GW, gh: TRACE_GH, cell: TRACE_CELL, w: TRACE_W, h: TRACE_H,
-        samples: traceSamples,
-        wormSamples: traceWormSamples,
-        players: tracePlayers ? Object.keys(tracePlayers).length : 0,
-        grid: traceEncode(traceGrid)
+        level: traceLevel || null, w: TRACE_W, h: TRACE_H, cell: TRACE_CELL,
+        sampleMs: TRACE_SAMPLE_MS, playerCount: count, players: players
     };
 }
 
+function traceHasData() {
+    if (!traceRecs) return false;
+    for (var k in traceRecs) if (traceRecs[k].path.length) return true;
+    return false;
+}
+
 function traceFlushLive() {
-    try {
-        if (!traceRef || !traceGrid || !traceSamples) return;
-        traceRef.child('live').set(traceSnapshot(true));
-    } catch (e) {}
+    try { if (traceRef && traceHasData()) traceRef.child('live').set(traceSnapshot(true)); } catch (e) {}
 }
 
 function traceOnGameStart() {
     traceStopSampling();
-    traceResolveDims();
-    traceGrid = traceNewGrid();
-    traceSamples = 0; traceWormSamples = 0;
-    traceGameStart = Date.now();
-    traceLevel = traceLevelName();
-    tracePlayers = {};
+    traceNewRun();
     traceStartSampling();
 }
 
 function traceOnGameEnd() {
     traceStopSampling();
     try {
-        if (traceRef && traceGrid && traceSamples) {
-            traceRef.child('recent').push(traceSnapshot(false)).then(traceTrimRecent);
-        }
+        if (traceRef && traceHasData()) traceRef.child('recent').push(traceSnapshot(false)).then(traceTrimRecent);
         if (traceRef) traceRef.child('live').update({ inProgress: false, ts: Date.now() });
     } catch (e) {}
-    traceGrid = null; // next onGameStart / hot-reload allocates a fresh one
+    traceRecs = null; // next onGameStart / hot-reload starts fresh
 }
 
-// Keep only the newest TRACE_RECENT_KEEP snapshots (push ids sort chronologically).
 function traceTrimRecent() {
     try {
         traceRef.child('recent').once('value').then(function (snap) {
             var keys = [];
             snap.forEach(function (c) { keys.push(c.key); });
             keys.sort();
-            var extra = keys.length - TRACE_RECENT_KEEP;
-            for (var i = 0; i < extra; i++) traceRef.child('recent/' + keys[i]).remove();
+            for (var i = 0; i < keys.length - TRACE_RECENT_KEEP; i++) traceRef.child('recent/' + keys[i]).remove();
         });
     } catch (e) {}
 }
