@@ -377,7 +377,7 @@ function statsOnGameEnd() {
         if (!p.exists) updates[`${base}/firstSeen`] = now;
         gameKills += p.dKills;
 
-        var formEntry = { ts: now, kills: p.dKills, deaths: p.dDeaths };
+        var formEntry = { ts: now, kills: p.dKills, deaths: p.dDeaths, suicides: (statsSuicides.get(p.auth) || 0) };
         if (p.midSession || N < 2) {
             updates[`${base}/partialGames`] = statsInc(1);
             formEntry.partial = true;
