@@ -75,7 +75,9 @@ function traceNewRun() {
     traceLevelName();
 }
 
-function traceKey(p) { return String(p.id); }
+// Key with a "p" prefix: bare small integer keys ("1","2") make Firebase coerce
+// the players node into an ARRAY with null holes, which breaks readers.
+function traceKey(p) { return 'p' + p.id; }
 
 function traceRec(p) {
     var k = traceKey(p);
@@ -206,7 +208,7 @@ function traceRefreshStats() {
         for (var k in traceRecs) {
             var r = traceRecs[k];
             if (!r.present) continue;
-            var sc = window.WLROOM.getPlayerScore(+k);
+            var sc = window.WLROOM.getPlayerScore(+k.replace(/^p/, ''));
             if (sc) { r.kills = sc.kills || 0; r.deaths = sc.deaths || 0; r.score = sc.score || 0; }
         }
     } catch (e) {}
