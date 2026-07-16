@@ -23,10 +23,18 @@
 // the same schema by reading ROOMOBJECT.Tb.W.B.qa on a spectator bot. Only ONE
 // writer per room — this host-side tracer is the default; don't also run the bot.
 
-var TRACE_W = 504, TRACE_H = 350;                 // webliero level pixel dims
-var TRACE_CELL = 7;                               // downsample factor
-var TRACE_GW = Math.ceil(TRACE_W / TRACE_CELL);   // 72 cells wide
-var TRACE_GH = Math.ceil(TRACE_H / TRACE_CELL);   // 50 cells tall
+var TRACE_CELL = 7;                               // downsample factor (px per cell)
+// Map dims are resolved per-game from the loaded level (mappool.js tracks
+// currentMapW/currentMapH). Classic .lev is 504x350 but PNG/raw maps vary, so
+// these are NOT hardcoded — a fixed box would clip worms on a larger map.
+var TRACE_W = 504, TRACE_H = 350;
+var TRACE_GW = 72, TRACE_GH = 50;
+function traceResolveDims() {
+    TRACE_W = (typeof currentMapW === 'number' && currentMapW > 0) ? currentMapW : 504;
+    TRACE_H = (typeof currentMapH === 'number' && currentMapH > 0) ? currentMapH : 350;
+    TRACE_GW = Math.ceil(TRACE_W / TRACE_CELL);
+    TRACE_GH = Math.ceil(TRACE_H / TRACE_CELL);
+}
 var TRACE_SAMPLE_MS = 250;                        // position sample cadence
 var TRACE_FLUSH_MS = 3000;                        // live-node write cadence
 var TRACE_RECENT_KEEP = 4;                        // finished-game snapshots retained
@@ -68,13 +76,21 @@ function traceWormXY(p) {
     return { x: x, y: y };
 }
 
+// Prefer the fork's currentMapName (the actual loaded level); getSettings has
+// no current-level field on the headless build.
+function traceLevelName() {
+    if (typeof currentMapName === 'string' && currentMapName) return currentMapName;
+    return statsCurrentLevelName ? statsCurrentLevelName() : null;
+}
+
 function traceStartSampling() {
     if (traceSampleTimer) return;
     if (!traceGrid) {
+        traceResolveDims();
         traceGrid = traceNewGrid();
         traceSamples = 0; traceWormSamples = 0;
         traceGameStart = Date.now(); tracePlayers = {};
-        traceLevel = statsCurrentLevelName ? statsCurrentLevelName() : null;
+        traceLevel = traceLevelName();
     }
     traceSampleTimer = setInterval(traceSample, TRACE_SAMPLE_MS);
     traceFlushTimer = setInterval(traceFlushLive, TRACE_FLUSH_MS);
@@ -146,10 +162,11 @@ function traceFlushLive() {
 
 function traceOnGameStart() {
     traceStopSampling();
+    traceResolveDims();
     traceGrid = traceNewGrid();
     traceSamples = 0; traceWormSamples = 0;
     traceGameStart = Date.now();
-    traceLevel = statsCurrentLevelName ? statsCurrentLevelName() : null;
+    traceLevel = traceLevelName();
     tracePlayers = {};
     traceStartSampling();
 }
