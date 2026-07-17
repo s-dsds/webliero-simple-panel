@@ -140,8 +140,9 @@ function loadnewMap(childSnapshot) {
 	var k = childSnapshot.key;
 
     mypool[k] = v;
-    shufflePool();
-	
+    rebuildPoolIdx(); // was shufflePool() — don't scramble the whole running
+                      // order every time one map is added; keep order, append new
+
 	console.log("map `"+v+"` has been added to the pool");
     notifyAdmins("map `"+v+"` has been added to the pool");
 }
@@ -150,7 +151,7 @@ function removeMap(childSnapshot) {
 	var k = childSnapshot.key;
 	var n = mypool[k];
     delete mypool[k];
-    shufflePool();
+    rebuildPoolIdx(); // was shufflePool()
 	console.log("map `"+n+"` has been remove from the pool");
     notifyAdmins("map `"+n+"` has been remove from the pool");
 }
