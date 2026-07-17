@@ -8,6 +8,45 @@ var otherPools = new Map();
 var currentMap = 0;
 var currentMapName = "";
 
+// Play-order mode: "shuffle" (randomized, reshuffled each full cycle, avoids
+// back-to-back repeats) or "ordered" (play the pool in its saved order, or a
+// manual order set from the panel). Persisted to RTDB poolmode so it survives.
+var poolMode = "shuffle";
+var poolModeRef;
+var lastPlayedKey = null; // for the no-immediate-repeat guard across reshuffles
+
+// rebuildPoolIdx derives the play order (mypoolIdx) from the current pool.
+//   reset=true  (mode switch / initial): derive fresh — ordered = the pool's
+//               saved order, shuffle = a full shuffle.
+//   reset=false (a pool add/remove at runtime): PRESERVE the current order for
+//               maps still present and append any new ones (shuffled in shuffle
+//               mode). This is the fix for the old behaviour that reshuffled the
+//               whole order — and lost a manual arrangement — on every edit.
+function rebuildPoolIdx(reset) {
+    var keys = Object.keys(mypool);
+    if (reset) {
+        mypoolIdx = keys.slice();
+        if (poolMode === "shuffle") shuffleArray(mypoolIdx);
+    } else {
+        var kept = mypoolIdx.filter(function (k) { return mypool[k] !== undefined; });
+        var added = keys.filter(function (k) { return kept.indexOf(k) < 0; });
+        if (poolMode === "shuffle") shuffleArray(added);
+        mypoolIdx = kept.concat(added);
+    }
+    if (currentMap >= mypoolIdx.length) currentMap = 0;
+    publishPoolState();
+}
+
+// smartReshuffle randomizes the order and nudges the first map so it isn't the
+// one we just finished playing (no back-to-back repeat across the cycle seam).
+function smartReshuffle() {
+    shuffleArray(mypoolIdx);
+    if (mypoolIdx.length > 1 && mypoolIdx[0] === lastPlayedKey) {
+        var j = 1 + Math.floor(Math.random() * (mypoolIdx.length - 1));
+        var t = mypoolIdx[0]; mypoolIdx[0] = mypoolIdx[j]; mypoolIdx[j] = t;
+    }
+}
+
 function loadPool(name) {
 	(async () => {
 	mypool = await (await fetch(baseURL + '/' +  name)).json();
@@ -80,7 +119,15 @@ function loadMap(name, data) {
 }
 
 function resolveNextMap() {
-    currentMap=currentMap+1<mypoolIdx.length?currentMap+1:0;
+    if (mypoolIdx.length) lastPlayedKey = mypoolIdx[currentMap];
+    if (currentMap + 1 < mypoolIdx.length) {
+        currentMap = currentMap + 1;
+    } else {
+        // reached the end of the play list: wrap, and in shuffle mode reshuffle
+        // for a fresh order each cycle (ordered mode just loops in place).
+        currentMap = 0;
+        if (poolMode === "shuffle") smartReshuffle();
+    }
     let nn = mypool[mypoolIdx[currentMap]];
     if (nn) currentMapName = nn; // keep the last valid name if the pool resolves empty
                                  // (don't blank it — that wedged the map underlay
@@ -166,6 +213,11 @@ function initPoolPanel() {
     }
     poolStateRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolstate`);
     poolCtlRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolctl`);
+    poolModeRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolmode`);
+    poolModeRef.once('value').then((s) => {
+        var m = s.val();
+        if (m === 'ordered' || m === 'shuffle') { poolMode = m; rebuildPoolIdx(true); }
+    });
     poolCtlRef.on('value', (snap) => {
         const c = snap.val();
         if (!c || !c.action) {
@@ -187,6 +239,7 @@ function publishPoolState() {
         order: mypoolIdx.map((k) => mypool[k] ?? null),
         current: currentMap,
         currentMapName: currentMapName || null,
+        mode: poolMode,
         updatedAt: Date.now()
     });
 }
@@ -208,6 +261,24 @@ function applyPoolCtl(c) {
         loadMapOrSubPool();
         publishPoolState();
         notifyAdmins(`map switched to ${currentMapName} (panel)`);
+    } else if (c.action == "setorder" && Array.isArray(c.order)) {
+        // Manual play order: reorder mypoolIdx to match the given list of map
+        // NAMES (from the panel's drag-and-drop). Names can repeat, so consume
+        // pool keys per name; any pool map not listed is appended (safety).
+        var byName = {};
+        Object.keys(mypool).forEach(function (k) { (byName[mypool[k]] = byName[mypool[k]] || []).push(k); });
+        var newIdx = [];
+        c.order.forEach(function (name) { var ks = byName[name]; if (ks && ks.length) newIdx.push(ks.shift()); });
+        Object.keys(mypool).forEach(function (k) { if (newIdx.indexOf(k) < 0) newIdx.push(k); });
+        mypoolIdx = newIdx;
+        currentMap = 0;
+        publishPoolState();
+        notifyAdmins("play order set manually (panel)");
+    } else if (c.action == "mode" && (c.mode == "shuffle" || c.mode == "ordered")) {
+        poolMode = c.mode;
+        if (poolModeRef) poolModeRef.set(poolMode);
+        rebuildPoolIdx(true);
+        notifyAdmins("map order mode set to " + poolMode + " (panel)");
     }
 }
 
