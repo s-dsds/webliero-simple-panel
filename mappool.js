@@ -15,6 +15,30 @@ var poolMode = "shuffle";
 var poolModeRef;
 var lastPlayedKey = null; // for the no-immediate-repeat guard across reshuffles
 
+// Per-map player-count bounds (RTDB poolbounds: { "<mapname>": {min,max} }).
+// At rotation the next map is skipped if the room's player count is outside its
+// bounds — so small maps can be reserved for few players and vice-versa.
+var poolBounds = {};
+var poolBoundsRef;
+
+// Number of players the next map should be sized for. Uses active (non-spectator)
+// worms; falls back to everyone in the room, then to "many" so bounds never wedge.
+function playerCountForMaps() {
+    try {
+        var ps = window.WLROOM.getPlayerList();
+        var active = ps.filter(function (p) { return p.team && p.team !== 0; }).length;
+        return active || ps.length || 0;
+    } catch (e) { return 99; }
+}
+
+function mapFitsPlayers(name, n) {
+    var b = poolBounds[name];
+    if (!b) return true;
+    if (typeof b.min === "number" && b.min > 0 && n < b.min) return false;
+    if (typeof b.max === "number" && b.max > 0 && n > b.max) return false;
+    return true;
+}
+
 // rebuildPoolIdx derives the play order (mypoolIdx) from the current pool.
 //   reset=true  (mode switch / initial): derive fresh — ordered = the pool's
 //               saved order, shuffle = a full shuffle.
@@ -118,8 +142,7 @@ function loadMap(name, data) {
     window.WLROOM.loadRawLevel(name,buff, data.x, data.y);
 }
 
-function resolveNextMap() {
-    if (mypoolIdx.length) lastPlayedKey = mypoolIdx[currentMap];
+function advanceOne() {
     if (currentMap + 1 < mypoolIdx.length) {
         currentMap = currentMap + 1;
     } else {
@@ -127,6 +150,17 @@ function resolveNextMap() {
         // for a fresh order each cycle (ordered mode just loops in place).
         currentMap = 0;
         if (poolMode === "shuffle") smartReshuffle();
+    }
+}
+
+function resolveNextMap() {
+    if (mypoolIdx.length) lastPlayedKey = mypoolIdx[currentMap];
+    advanceOne();
+    // Skip maps whose player-count bounds don't fit the current room (bounded
+    // scan; if nothing fits we just keep wherever we landed — never wedge).
+    var n = playerCountForMaps();
+    for (var tries = 0; tries < mypoolIdx.length - 1 && !mapFitsPlayers(mypool[mypoolIdx[currentMap]], n); tries++) {
+        advanceOne();
     }
     let nn = mypool[mypoolIdx[currentMap]];
     if (nn) currentMapName = nn; // keep the last valid name if the pool resolves empty
@@ -218,6 +252,8 @@ function initPoolPanel() {
         var m = s.val();
         if (m === 'ordered' || m === 'shuffle') { poolMode = m; rebuildPoolIdx(true); }
     });
+    poolBoundsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolbounds`);
+    poolBoundsRef.on('value', (s) => { poolBounds = s.val() || {}; });
     poolCtlRef.on('value', (snap) => {
         const c = snap.val();
         if (!c || !c.action) {
