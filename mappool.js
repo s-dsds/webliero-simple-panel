@@ -21,6 +21,12 @@ var lastPlayedKey = null; // for the no-immediate-repeat guard across reshuffles
 var poolBounds = {};
 var poolBoundsRef;
 
+// Consecutive map-load failures. A map that won't fetch must not wedge the
+// rotation (that stalls the room on the end screen): we log it and advance to
+// the next map, and only fall back to restarting the current level once we've
+// tried the whole pool without a single load succeeding.
+var mapLoadFailures = 0;
+
 // Number of players the next map should be sized for. Uses active (non-spectator)
 // worms; falls back to everyone in the room, then to "many" so bounds never wedge.
 function playerCountForMaps() {
@@ -90,12 +96,16 @@ async function getMapData(mapUrl) {
       return obj;
     }
     try {
-        obj = await (await fetch(mapUrl)).arrayBuffer();
-    }catch(e) {
+        var resp = await fetch(mapUrl);
+        if (!resp.ok) {                       // 404/5xx: log it — don't fail silently
+            console.log("mappool: map fetch " + mapUrl + " -> HTTP " + resp.status);
+            return null;
+        }
+        obj = await resp.arrayBuffer();
+    } catch (e) {                             // network/CORS error: log it too
+        console.log("mappool: map fetch " + mapUrl + " failed: " + ((e && e.message) || e));
         return null;
     }
-
-    
     mapCache.set(mapUrl, obj)
     return obj;
 }
@@ -119,9 +129,23 @@ function loadMapByName(name) {
     (async () => {
         let data = await getMapData(getMapUrl(name));
         if (data == null) {
-            notifyAdmins(`map ${name} could not be loaded`)
-            window.WLROOM.restartGame();
-        } else if (name.split('.').pop()=="png") {
+            // Don't wedge the room on a map that won't load: log, warn admins,
+            // and move to the NEXT map. Bounded by the pool size so a full
+            // outage (every map failing) falls back to a restart instead of
+            // looping forever.
+            console.log("mappool: could not load '" + name + "' — advancing to next map");
+            notifyAdmins(`map ${name} could not be loaded — skipping to the next one`);
+            if (++mapLoadFailures <= (mypoolIdx.length || 1)) {
+                resolveNextMap();
+            } else {
+                mapLoadFailures = 0;
+                console.log("mappool: every pool map failed to load; restarting on current level");
+                window.WLROOM.restartGame();
+            }
+            return;
+        }
+        mapLoadFailures = 0; // a successful load clears the failure streak
+        if (name.split('.').pop()=="png") {
             let d = pngDims(data);
             currentMapW = d ? d.w : 504; currentMapH = d ? d.h : 350;
             currentMapName = name; // keep the name tied to the ACTUAL loaded map
