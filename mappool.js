@@ -95,16 +95,24 @@ async function getMapData(mapUrl) {
     if (obj) {
       return obj;
     }
+    // A HUNG fetch is worse than a failed one: a network/VPN change mid-request
+    // can stall the connection without ever rejecting, and the await then wedges
+    // the rotation forever (room stuck on the end screen). Abort after 20s so a
+    // hang becomes a normal logged failure that skips to the next map.
+    var ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, 20000) : null;
     try {
-        var resp = await fetch(mapUrl);
+        var resp = await fetch(mapUrl, ctl ? { signal: ctl.signal } : {});
         if (!resp.ok) {                       // 404/5xx: log it — don't fail silently
             console.log("mappool: map fetch " + mapUrl + " -> HTTP " + resp.status);
             return null;
         }
         obj = await resp.arrayBuffer();
-    } catch (e) {                             // network/CORS error: log it too
+    } catch (e) {                             // network/CORS error or 20s abort: log it too
         console.log("mappool: map fetch " + mapUrl + " failed: " + ((e && e.message) || e));
         return null;
+    } finally {
+        if (timer) clearTimeout(timer);
     }
     mapCache.set(mapUrl, obj)
     return obj;
