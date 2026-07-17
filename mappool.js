@@ -347,6 +347,13 @@ function applyPoolCtl(c) {
         if (poolModeRef) poolModeRef.set(poolMode);
         rebuildPoolIdx(true);
         notifyAdmins("map order mode set to " + poolMode + " (panel)");
+    } else if (c.action == "clearcache") {
+        // Drop cached map data so the next load re-fetches from the source —
+        // the panel-side twin of the in-room !clearcache command.
+        var n = mapCache.size;
+        mapCache.clear();
+        console.log("mappool: map cache cleared (panel), " + n + " entries dropped");
+        notifyAdmins("map cache cleared (panel), " + n + " entries dropped");
     }
 }
 
