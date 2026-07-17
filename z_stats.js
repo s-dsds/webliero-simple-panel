@@ -528,3 +528,53 @@ function statsDeepGet(obj, path) {
     for (var i = 0; i < parts.length; i++) { if (o == null) return 0; o = o[parts[i]]; }
     return typeof o === 'number' ? o : 0;
 }
+
+// ── !stats command ──────────────────────────────────────────────────────────
+// A public link to the room's stats page + the top 5 players by ELO (and the
+// caller's own rank if they're outside the top 5). Reads stats/players once;
+// keys match the writer (raw auth). Base URL is CONFIG.stats_base_url or the
+// ext-proxy default.
+var STATS_BASE_URL = (typeof CONFIG !== 'undefined' && CONFIG.stats_base_url) || "https://ext-proxy.fly.dev";
+var STATS_MEDALS = ["🥇", "🥈", "🥉"];
+
+function statsPageLink() {
+    return STATS_BASE_URL.replace(/\/+$/, "") + "/stats/" + encodeURIComponent(CONFIG.room_id);
+}
+function statsEloLine(rank, r, medal) {
+    return rank + ". " + r.name + " — " + Math.round(r.elo) + " ELO with " + r.games +
+        " game" + (r.games === 1 ? "" : "s") + " played" + (medal ? " " + medal : "");
+}
+
+COMMAND_REGISTRY.add("stats", ["!stats: room stats page link + top 5 players by ELO"], function (player) {
+    var link = statsPageLink();
+    if (!statsRootRef) { announce("Room stats: " + link, player.id, COLORS.INFO); return false; }
+    var myAuth = player.auth || (typeof auth !== 'undefined' && auth.get ? auth.get(player.id) : null);
+    statsRootRef.child('players').once('value').then(function (snap) {
+        var rows = [];
+        snap.forEach(function (c) {
+            var v = c.val() || {};
+            if (typeof v.elo !== 'number' && !(v.games > 0)) return; // only ranked players
+            rows.push({
+                key: c.key, name: v.name || c.key,
+                elo: (typeof v.elo === 'number' ? v.elo : STATS_COLD_ELO), games: v.games || 0
+            });
+        });
+        rows.sort(function (a, b) { return (b.elo - a.elo) || (b.games - a.games); });
+
+        announce("=== TOP 5 ELO ===", player.id, COLORS.IMPORTANT);
+        var top = rows.slice(0, 5);
+        top.forEach(function (r, i) { announce(statsEloLine(i + 1, r, STATS_MEDALS[i]), player.id, COLORS.ANNOUNCE); });
+        if (!top.length) announce("(no ranked games recorded yet)", player.id, COLORS.NORMAL);
+
+        // the caller's own standing, only if they're ranked and outside the top 5
+        if (myAuth) {
+            var myIdx = -1;
+            for (var i = 0; i < rows.length; i++) { if (rows[i].key === myAuth) { myIdx = i; break; } }
+            if (myIdx >= 5) announce("You: " + statsEloLine(myIdx + 1, rows[myIdx], null), player.id, COLORS.PRIVATE);
+        }
+        announce("Full stats: " + link, player.id, COLORS.INFO);
+    }).catch(function () {
+        announce("Room stats: " + link, player.id, COLORS.INFO); // link still works even if the read fails
+    });
+    return false;
+});
