@@ -53,6 +53,14 @@ function statsPend(auth, name) {
     return p;
 }
 
+// Declared (and assigned) ABOVE initStats: on a hot-reload of z_stats.js alone,
+// fdb is already set from the prior load, so initStats runs fully synchronously
+// on this pass — if STATS_LIVE_MS were still declared further down the file it
+// would be `undefined` at the setInterval call (→ 0ms busy interval). statsLiveTimer
+// lets us clear a previous interval so hot reloads don't stack duplicates.
+var STATS_LIVE_MS = 4000;
+var statsLiveTimer = (typeof statsLiveTimer !== 'undefined') ? statsLiveTimer : null;
+
 function initStats() {
     if (typeof fdb == 'undefined' || !fdb) { setTimeout(initStats, 200); return; }
     statsRootRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/stats`);
@@ -89,13 +97,13 @@ function initStats() {
     // panel would look frozen. Write a small `live` node (current players +
     // their in-game scores) every few seconds so viewers see the game as it
     // happens. One whole-node overwrite per tick, only while a game runs.
-    setInterval(statsWriteLive, STATS_LIVE_MS);
+    if (statsLiveTimer) clearInterval(statsLiveTimer); // hot reload: don't stack intervals
+    statsLiveTimer = setInterval(statsWriteLive, STATS_LIVE_MS);
 
     console.log('stats ok');
 }
 initStats();
 
-var STATS_LIVE_MS = 4000;
 var statsLiveWasRunning = false;
 function statsWriteLive() {
     try {

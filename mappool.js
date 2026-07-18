@@ -26,6 +26,18 @@ var poolBoundsRef;
 // the next map, and only fall back to restarting the current level once we've
 // tried the whole pool without a single load succeeding.
 var mapLoadFailures = 0;
+// A FIXED cap on consecutive load failures before we give up and restart on the
+// current level. Must NOT scale with pool size: pool_war.json has ~79 maps and
+// each failed attempt can now burn up to the 20s fetch-abort window, so a
+// pool-sized bound could wedge the room on the end screen for ~26 minutes during
+// a real outage. A small constant bounds worst-case recovery to a few seconds.
+var MAX_MAP_LOAD_FAILURES = 5;
+// Monotonic load generation. Every loadMapByName call claims the next value;
+// when its async fetch finally resolves it only applies the result (or advances
+// on failure) if it's still the newest request. Without this, a slow/aborting
+// fetch for map A can resolve AFTER an admin's !map B already loaded, and stomp
+// B's level + currentMapName (which z_trace + the panel read).
+var mapLoadSeq = 0;
 
 // Number of players the next map should be sized for. Uses active (non-spectator)
 // worms; falls back to everyone in the room, then to "many" so bounds never wedge.
@@ -135,24 +147,35 @@ function pngDims(data) {
     return null;
 }
 
+// onLoadFailure: shared skip-or-restart policy for a failed load. Bounded by a
+// FIXED count so a full outage restarts in seconds, not minutes.
+function onLoadFailure(name, reason) {
+    console.log("mappool: " + reason + " '" + name + "' — advancing to next map");
+    notifyAdmins(`map ${name} could not be loaded — skipping to the next one`);
+    if (++mapLoadFailures <= MAX_MAP_LOAD_FAILURES) {
+        resolveNextMap();
+    } else {
+        mapLoadFailures = 0;
+        console.log("mappool: " + MAX_MAP_LOAD_FAILURES + " maps failed to load in a row; restarting on current level");
+        window.WLROOM.restartGame();
+    }
+}
+
 function loadMapByName(name) {
     console.log(name);
+    var myGen = ++mapLoadSeq; // claim this load; a later call supersedes us
     (async () => {
         let data = await getMapData(getMapUrl(name));
+        // A newer load was requested while our fetch was in flight (e.g. auto
+        // rotation raced by an admin !map). Drop this stale result entirely —
+        // don't apply the level and don't advance-on-failure, or we'd stomp the
+        // map the newer request already chose.
+        if (myGen !== mapLoadSeq) {
+            console.log("mappool: stale load of '" + name + "' (gen " + myGen + " < " + mapLoadSeq + ") — ignored");
+            return;
+        }
         if (data == null) {
-            // Don't wedge the room on a map that won't load: log, warn admins,
-            // and move to the NEXT map. Bounded by the pool size so a full
-            // outage (every map failing) falls back to a restart instead of
-            // looping forever.
-            console.log("mappool: could not load '" + name + "' — advancing to next map");
-            notifyAdmins(`map ${name} could not be loaded — skipping to the next one`);
-            if (++mapLoadFailures <= (mypoolIdx.length || 1)) {
-                resolveNextMap();
-            } else {
-                mapLoadFailures = 0;
-                console.log("mappool: every pool map failed to load; restarting on current level");
-                window.WLROOM.restartGame();
-            }
+            onLoadFailure(name, "could not load");
             return;
         }
         mapLoadFailures = 0; // a successful load clears the failure streak
@@ -173,14 +196,7 @@ function loadMapByName(name) {
             // bounds of the DataView" on a GIMP export with ancillary chunks).
             // Same policy as a failed fetch: log, warn, skip — never wedge the
             // rotation on the end screen.
-            console.log("mappool: engine failed to load '" + name + "': " + ((e && e.message) || e));
-            notifyAdmins(`map ${name} failed to load in the engine — skipping to the next one`);
-            if (++mapLoadFailures <= (mypoolIdx.length || 1)) {
-                resolveNextMap();
-            } else {
-                mapLoadFailures = 0;
-                window.WLROOM.restartGame();
-            }
+            onLoadFailure(name, "engine failed to load (" + ((e && e.message) || e) + ")");
         }
     })();
 }
@@ -433,7 +449,10 @@ COMMAND_REGISTRY.add("addmap", ["!addmap #name: adds a map to the current pool"]
         mapname=mapname.substring(baseURL.length+1)
     }
     (async () => {
-        if (null == getMapData(getMapUrl(mapname))) {
+        // getMapData is async — the old `null == getMapData(...)` compared a
+        // Promise (never null), so the "could not load" guard was dead code and
+        // bad maps got added anyway. Await it.
+        if (null == (await getMapData(getMapUrl(mapname)))) {
             announce(`map ${mapname} could not be loaded`, player.id, COLORS.ERROR)
             return;
         }
