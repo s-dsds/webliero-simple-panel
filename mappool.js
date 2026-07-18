@@ -84,7 +84,10 @@ function loadPool(name) {
 }
 
 function getMapUrl(name) {
-    if (name.substring(0,8)=='https://') {
+    // http:// too — local/dev map hosts (e.g. an ext-proxy dev instance
+    // serving /mapfile uploads); https-only silently glued the URL onto
+    // baseURL and 404'd.
+    if (/^https?:\/\//.test(name)) {
         return name;
     }
     return baseURL + '/' +  name;
