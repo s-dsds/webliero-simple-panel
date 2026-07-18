@@ -227,6 +227,12 @@ function writeLogins(p, type ="login") {
 
 function writeLog(p, msg) {
     const now = Date.now();
+    // Structured line for the launcher's local chat store (wlhl HTTP API —
+    // see headless-launcher-go/_specs/http-api.md). Dual-written with RTDB
+    // until the panel reads chat from the host API; then the RTDB write goes.
+    try {
+        console.log("@@CHAT@@ " + JSON.stringify({ts: now, name: p.name, auth: auth.get(p.id) || null, msg: msg}));
+    } catch (e) {}
     const day = new Date(now).toISOString().slice(0,10).replace(/-/g,'');
     commentsRef.child(day).child(now).set({name: p.name, auth:auth.get(p.id), msg:msg, formatted:(new Date(now).toLocaleString())});
 }
