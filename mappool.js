@@ -156,15 +156,31 @@ function loadMapByName(name) {
             return;
         }
         mapLoadFailures = 0; // a successful load clears the failure streak
-        if (name.split('.').pop()=="png") {
-            let d = pngDims(data);
-            currentMapW = d ? d.w : 504; currentMapH = d ? d.h : 350;
-            currentMapName = name; // keep the name tied to the ACTUAL loaded map
-            window.WLROOM.loadPNGLevel(name, data);
-        } else {
-            currentMapW = 504; currentMapH = 350; // classic .lev is fixed size
-            currentMapName = name;
-            window.WLROOM.loadLev(name, data);
+        try {
+            if (name.split('.').pop()=="png") {
+                let d = pngDims(data);
+                currentMapW = d ? d.w : 504; currentMapH = d ? d.h : 350;
+                currentMapName = name; // keep the name tied to the ACTUAL loaded map
+                window.WLROOM.loadPNGLevel(name, data);
+            } else {
+                currentMapW = 504; currentMapH = 350; // classic .lev is fixed size
+                currentMapName = name;
+                window.WLROOM.loadLev(name, data);
+            }
+        } catch (e) {
+            // The ENGINE rejected the bytes (e.g. a PNG layout its hand-rolled
+            // parser can't read — seen live: "RangeError: Offset is outside the
+            // bounds of the DataView" on a GIMP export with ancillary chunks).
+            // Same policy as a failed fetch: log, warn, skip — never wedge the
+            // rotation on the end screen.
+            console.log("mappool: engine failed to load '" + name + "': " + ((e && e.message) || e));
+            notifyAdmins(`map ${name} failed to load in the engine — skipping to the next one`);
+            if (++mapLoadFailures <= (mypoolIdx.length || 1)) {
+                resolveNextMap();
+            } else {
+                mapLoadFailures = 0;
+                window.WLROOM.restartGame();
+            }
         }
     })();
 }
