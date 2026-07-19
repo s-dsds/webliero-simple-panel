@@ -186,7 +186,8 @@ function statsAddParticipant(player, midSession) {
         auth: a, name: player.name,
         // snapshot the score at the moment we start tracking them; deltas from here
         scoreStart: sc.score, killsStart: sc.kills, deathsStart: sc.deaths,
-        elo: STATS_COLD_ELO, form: [], midSession: !!midSession
+        elo: STATS_COLD_ELO, form: [], midSession: !!midSession,
+        streak: 0, bestStreak: 0, fastestWinMs: 0
     });
     statsSeedParticipant(a, player.id);
 }
@@ -197,12 +198,24 @@ function statsSeedParticipant(a, id) {
         var pc = statsParticipants.get(id);
         if (!pc) return;
         var v = snap.val();
-        if (v) { pc.elo = (typeof v.elo == 'number') ? v.elo : STATS_COLD_ELO; pc.form = Array.isArray(v.form) ? v.form : []; pc.exists = true; }
+        if (v) {
+            pc.elo = (typeof v.elo == 'number') ? v.elo : STATS_COLD_ELO;
+            pc.form = Array.isArray(v.form) ? v.form : [];
+            pc.exists = true;
+            // 1v1 extras (same read, no extra RTDB traffic): current streak,
+            // best streak, fastest decisive win — absolutes rewritten at flush.
+            pc.streak = (typeof v.streak == 'number') ? v.streak : 0;
+            pc.bestStreak = (typeof v.bestStreak == 'number') ? v.bestStreak : 0;
+            pc.fastestWinMs = (typeof v.fastestWinMs == 'number') ? v.fastestWinMs : 0;
+        }
     });
 }
 
+var statsGameStartTs = 0; // for duel duration / fastest-win (1v1 extras)
+
 function statsOnGameStart() {
     statsGameInProgress = true;
+    statsGameStartTs = Date.now();
     statsParticipants.clear();
     // reset per-game weapon/damage accumulators
     statsDmgDealt.clear(); statsDmgTaken.clear();
@@ -454,6 +467,53 @@ function statsOnGameEnd() {
         }
     }
 
+    // ── 1v1 extras (arena-style ladder stats) — only for true duels: exactly
+    // two FULL-game participants. All bounded: per-auth absolutes (streaks,
+    // fastest win), per-pair h2h counters, per-auth-per-map counters, duel
+    // duration as sum+count. Never per-game rows (spec: plugin-architecture §6d
+    // — the scalable replacement for arena's unbounded gamestats replay).
+    if (N === 2) {
+        var d0 = full[0], d1 = full[1];
+        var duelMs = statsGameStartTs > 0 ? (now - statsGameStartTs) : 0;
+        var winner = null, loser = null;
+        if (d0.dScore !== d1.dScore) {
+            winner = d0.dScore > d1.dScore ? d0 : d1;
+            loser = winner === d0 ? d1 : d0;
+        }
+        for (var dp of [d0, d1]) {
+            var db = `players/${dp.auth}`;
+            if (winner === dp) {
+                var ns = (dp.streak || 0) + 1;
+                updates[`${db}/streak`] = ns;                                   // absolute
+                if (ns > (dp.bestStreak || 0)) updates[`${db}/bestStreak`] = ns; // absolute
+                if (duelMs > 0 && (!dp.fastestWinMs || duelMs < dp.fastestWinMs)) {
+                    updates[`${db}/fastestWinMs`] = duelMs;                     // absolute
+                }
+            } else if (loser === dp) {
+                updates[`${db}/streak`] = 0;
+            } // tie: streaks unchanged
+            updates[`${db}/duelMsSum`] = statsInc(duelMs);
+            updates[`${db}/duelCount`] = statsInc(1);
+        }
+        // head-to-head: one bounded node per PAIR, key = sorted auths; w0/w1 =
+        // wins for the first/second auth in the sorted key (stable positions).
+        var pa = [statsSafeKey(d0.auth), statsSafeKey(d1.auth)].sort();
+        var hb = `h2h/${pa[0]}__${pa[1]}`;
+        updates[`${hb}/games`] = statsInc(1);
+        if (winner) {
+            updates[`${hb}/${statsSafeKey(winner.auth) === pa[0] ? 'w0' : 'w1'}`] = statsInc(1);
+        }
+        // per-player per-map win-rate (bounded by the maps a player actually duels on)
+        var duelLvl = statsCurrentLevelName();
+        if (duelLvl) {
+            var lk = statsSafeKey(duelLvl);
+            for (var dp2 of [d0, d1]) {
+                updates[`players/${dp2.auth}/maps/${lk}/games`] = statsInc(1);
+                if (winner === dp2) updates[`players/${dp2.auth}/maps/${lk}/wins`] = statsInc(1);
+            }
+        }
+    }
+
     // daily rollup + level usage
     updates[`daily/${day}/games`] = statsInc(1);
     updates[`daily/${day}/kills`] = statsInc(gameKills);
@@ -529,7 +589,7 @@ function statsUpdateNoIncrement(updates) {
     });
 }
 function statsIsCounterPath(p) {
-    return /\/(kills|deaths|scoreSum|joins|chat|games|partialGames|wins|placeSumNorm|playtime|count|uniquePlayers|damage|damageDealt|damageTaken|suicides|lifeSum|lifeCount|killGapSum|killGapCount|spawnKillSum|spawnKillCount)$/.test(p);
+    return /\/(kills|deaths|scoreSum|joins|chat|games|partialGames|wins|placeSumNorm|playtime|count|uniquePlayers|damage|damageDealt|damageTaken|suicides|lifeSum|lifeCount|killGapSum|killGapCount|spawnKillSum|spawnKillCount|duelMsSum|duelCount|w0|w1)$/.test(p);
 }
 function statsDeepGet(obj, path) {
     var parts = path.split('/'), o = obj;
