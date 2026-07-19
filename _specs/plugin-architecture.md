@@ -313,23 +313,39 @@ So the "arena stats plugin" = the fork's `z_stats.js` aggregation engine + the
 cruft dropped: `mergedAuth` alt-merge, chat-printed leaderboards, the strict
 duel-duration validators (kept only as optional guards).
 
-### 7. newjohn as a plugin — port plan
+### 7. newjohn as a plugin — AS BUILT (2026-07-19)
 
-Source: `/home/qmdev/liero/newjohn`. Lower risk than arena (no queue).
-`newjohn_plugin.js` carries: the 16 map-geometry `effects` transforms
-(`effects.js`), the `!fx`/`!autofx`/`!autoexp` commands, in-browser mod-ZIP build
-(`mod.js` via `host.JSZip`) + `base_sprites` (bundle `mod_sprite.js`'s base64
-blob as a plugin asset), and the RTDB-driven live mod push. Port work:
-- namespace all bare globals under the closure (`next`, `mods`, `currMod`,
-  `effectList`, `autoFx`, …);
-- **chain** `onGameEnd2` (auto-advance) instead of assigning — must not fight the
-  base fork's rotation; expose `enabled` so a normal room keeps the fork's
-  mappool rotation and newjohn only advances when its own mode is on;
-- commands via `host.registry.add`;
-- config (`base_sprites`, map base URL, JSZip) injected, not ambient.
+Source: `/home/qmdev/liero/newjohn`. **The freeze investigation changed the
+design.** Root causes found (all fixed structurally, none carried over):
+- newjohn/effects.js: unbounded dimension growth + O(n²) `reduce(concat)` — a
+  chained `bigger`/`stretchy` blocks the JS thread minutes-to-forever (THE
+  silent freeze; autoFx drew unfiltered 6-effect chains via an off-by-one that
+  also ignored the configured count); sheared rows (`i%x==0` fires at i=0); OOB
+  reads on odd dims (`bottom`/`right`).
+- Data path: fetches with no timeout, `img.onload` with no `onerror` (bad PNG =
+  permanent wedge), and **70% of the live pool's .lev files are 176402+ bytes**
+  (CRLF-normalized binaries) fed to `loadRawLevel` with a hardcoded 504x350.
+- `!fx` no-args pushed a numeric index into the name-keyed effects table
+  (always threw); empty-pool rotation chained into an unhandled rejection.
 
-newjohn's effects are a clean first plugin to validate the framework (pure map
-transforms + one command, no queue, no stats coupling).
+As built:
+- **`newjohn_effects.js`** — the LATER, PROVEN buildinggame implementation
+  (c_effects.js + _material_init.js) bundled VERBATIM: 3000px caps, indexed
+  writes, corrected math, 26 effects incl. material-aware ones. Edit
+  buildinggame first, then re-port (keep diffable).
+- **`WL_MAP_TRANSFORM` hook in mappool.js** (not onGameEnd2 chaining as first
+  sketched): an optional async transform inside `loadMapByName`'s guarded IIFE —
+  fetch → stale-check → transform → SECOND stale-check → `len===w*h` validation
+  (a torn buffer can never reach the engine) → `loadRawLevel`, with fall-through
+  to the plain load on any error/null. Effects ride the fork's existing
+  timeouts, failure-skips and race guard; one map load per rotation.
+- **`newjohn_plugin.js`** — decode (.lev trimmed to exactly 504x350; PNG via
+  `window.__ReadPNG` (engine's own parser) or canvas+classic-palette fallback
+  with onerror+timeout), the transform, and `!fx` (name-keyed random fallback,
+  `name:arg` support), `!fxlist`, `!autofx N` (count honored), `!autoexp N`.
+- **NOT ported:** newjohn's `mod.js`/RTDB mod push — superseded by the panel's
+  mod system, and it was dead code (`loadMod()` had no callers in newjohn).
+  `base_sprites`/JSZip therefore not needed.
 
 ## Phasing / rollout
 
