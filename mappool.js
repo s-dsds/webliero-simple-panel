@@ -179,6 +179,41 @@ function loadMapByName(name) {
             return;
         }
         mapLoadFailures = 0; // a successful load clears the failure streak
+        // Optional map-transform hook (plugin extension point — newjohn effects).
+        // A registered async transform gets the RAW fetched bytes and may return
+        // {width,height,data:[palette indices]} to load via loadRawLevel instead
+        // of the plain engine load. Errors or null fall through to the normal
+        // path — the hook must never be able to wedge the rotation. The stale-
+        // load re-check runs again AFTER the await, since a transform can take
+        // long enough for a newer load to supersede us.
+        if (typeof window.WL_MAP_TRANSFORM === 'function') {
+            let t = null;
+            try {
+                t = await window.WL_MAP_TRANSFORM(name, data);
+            } catch (e) {
+                console.log("mappool: map transform failed on '" + name + "': " + ((e && e.message) || e) + " — loading untransformed");
+            }
+            if (myGen !== mapLoadSeq) {
+                console.log("mappool: stale load of '" + name + "' (post-transform) — ignored");
+                return;
+            }
+            if (t && t.data && t.width > 0 && t.height > 0 && t.data.length === t.width * t.height) {
+                try {
+                    currentMapW = t.width; currentMapH = t.height;
+                    currentMapName = name;
+                    window.WLROOM.loadRawLevel(name, new Uint8Array(t.data).buffer, t.width, t.height);
+                    return; // transformed load replaces the plain one
+                } catch (e) {
+                    onLoadFailure(name, "engine failed to load transformed (" + ((e && e.message) || e) + ")");
+                    return;
+                }
+            } else if (t) {
+                // A torn transform result (len !== w*h) must NEVER reach the
+                // engine — that's the newjohn silent-freeze class. Load plain.
+                console.log("mappool: transform returned invalid buffer for '" + name + "' (" +
+                    (t.width + "x" + t.height + " vs len " + (t.data ? t.data.length : "?")) + ") — loading untransformed");
+            }
+        }
         try {
             if (name.split('.').pop()=="png") {
                 let d = pngDims(data);
