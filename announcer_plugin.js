@@ -53,7 +53,9 @@ var ANNOUNCER_PLUGIN = (function () {
   function onJoin(player) {
     if (!settings.welcome || !player) return;
     var name = (player && player.name) || 'worm';
-    try { host.announce(settings.welcome.replace(/%name%/g, name), player.id, 0x88ff88); } catch (e) {}
+    // announce (zz_1v1.js) takes the player OBJECT (it reads .id itself); pass
+    // `player`, not player.id, or it falls through to a room-wide broadcast.
+    try { host.announce(settings.welcome.replace(/%name%/g, name), player, 0x88ff88); } catch (e) {}
     // returning nothing keeps the chain going (don't veto join handling)
   }
 
@@ -78,9 +80,9 @@ var ANNOUNCER_PLUGIN = (function () {
     if (host.registry && host.COMMAND) {
       host.registry.add(['tip', 'tips'], ['!tip: show a random room tip'], function (player) {
         var tips = normalizeTips(settings.tips);
-        if (!tips.length) { host.announce('no tips configured', player.id, 0xffaa55); return false; }
+        if (!tips.length) { host.announce('no tips configured', player, 0xffaa55); return false; }
         var t = tips[Math.floor(Math.random() * tips.length)];
-        host.announce(t, player.id, 0x88ccff);
+        host.announce(t, player, 0x88ccff); // player OBJECT — a raw id broadcasts
         return false; // consume the chat line
       }, host.COMMAND.FOR_ALL);
     }
