@@ -118,7 +118,11 @@ var ARENA_PLUGIN = (function () {
     if (scores == null || scores.length !== 2) { this.currentOut = null; return null; }
     var s0 = scores[0].score.score, s1 = scores[1].score.score;
     var mg = settings.maxGames | 0;
-    if (mg && this.lastGames.length >= mg) this.lastGames.shift();
+    // Ring cap: mg games of history, or 1 when unlimited (mg=0) — matching
+    // arena's literal behavior (its length>=0 always shifted). `while` (not
+    // arena's single `if`) so lowering maxGames via the panel converges
+    // immediately instead of one-entry-per-game.
+    while (this.lastGames.length >= (mg || 1)) this.lastGames.shift();
     this.lastGames.push(scores);
     if (s0 === s1) {
       for (var i = 0; i < scores.length; i++) {
@@ -294,6 +298,12 @@ var ARENA_PLUGIN = (function () {
       if (!isFull()) {
         moveToGame(player);
         host.room.restartGame();
+        return false;
+      }
+      if (playerAuth(player) == null) {
+        // add() refuses auth-less players (auth is the queue's dedup key);
+        // tell them the truth instead of "already in the queue".
+        host.announce('cannot queue you: no auth id (try rejoining the room)', player, 0xffaa55);
         return false;
       }
       if (playerqueue.add(player)) {
