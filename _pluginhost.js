@@ -36,8 +36,13 @@ window.WL_HOST = {
 window.WL_PLUGINS = {
   _all: [],
   register: function (p) {
-    if (p && p.manifest && p.manifest.id) this._all.push(p);
-    else console.log('WL_PLUGINS: ignoring a plugin with no manifest.id');
+    if (!p || !p.manifest || !p.manifest.id) { console.log('WL_PLUGINS: ignoring a plugin with no manifest.id'); return; }
+    // Replace any prior registration of the same id (a hot-reloaded plugin file
+    // re-runs register) so _all never holds two instances under one id.
+    for (var i = 0; i < this._all.length; i++) {
+      if (this._all[i].manifest.id === p.manifest.id) { this._all[i] = p; return; }
+    }
+    this._all.push(p);
   },
   initAll: function () {
     var conf = (window.WL_HOST.config && window.WL_HOST.config.plugins) || {};
