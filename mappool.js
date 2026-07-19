@@ -560,20 +560,30 @@ COMMAND_REGISTRY.add(["deladmin","da"], ["!deladmin #auth: removes an admin"], (
     return false;
 },  COMMAND.SUPER_ADMIN_ONLY);
 
-COMMAND_REGISTRY.add(["quit","q"], ["!quit or !q: spectate if in game"], (player)=> {
-    moveToSpec(player);
-    return false;
-}, COMMAND.FOR_ALL);
+// When the arena ladder plugin owns this room, it registers queue-aware
+// !q/!quit + !j/!join and these casual versions must NOT exist: the registry
+// silently overwrites on name collision, so a hot-reload of THIS file alone
+// would otherwise clobber the ladder's handlers back to these (a !q that
+// leaves the player queued forever; a !j with no isFull gate that can shove a
+// 3rd player into a duel). Cold boot is safe either way (this registers first,
+// arena overwrites at plugin init); the sentinel makes hot-reload safe too.
+if (!window.__ARENA_PLUGIN) {
+    COMMAND_REGISTRY.add(["quit","q"], ["!quit or !q: spectate if in game"], (player)=> {
+        moveToSpec(player);
+        return false;
+    }, COMMAND.FOR_ALL);
 
 
-COMMAND_REGISTRY.add(["join","j"], ["!join or !j: joins the game if spectating"], (player)=> {
-    if (!window.WLROOM.getSettings().teamsLocked || player.admin) {
-        moveToGame(player);
-    }
-    return false;
-}, COMMAND.FOR_ALL);
+    COMMAND_REGISTRY.add(["join","j"], ["!join or !j: joins the game if spectating"], (player)=> {
+        if (!window.WLROOM.getSettings().teamsLocked || player.admin) {
+            moveToGame(player);
+        }
+        return false;
+    }, COMMAND.FOR_ALL);
+}
 
 COMMAND_REGISTRY.add(["joinquit","jq", "quitjoin", "qj"], ["!joinquit or jq or quitjoin or qj: move out and back in the game"], (player)=> {
+    if (window.__ARENA_PLUGIN) { return false; } // arena rooms: seats are queue-managed
     moveToSpec(player)
     moveToGame(player)
     return false;

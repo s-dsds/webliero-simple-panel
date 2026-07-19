@@ -73,24 +73,36 @@ function initStats() {
         if (!s.exists()) statsRootRef.child('meta/playtimeSince').set(Date.now());
     });
 
-    chainFunction(window.WLROOM, 'onPlayerJoin', statsOnJoin);
-    chainFunction(window.WLROOM, 'onPlayerChat', statsOnChat);
-    chainFunction(window.WLROOM, 'onPlayerLeave', statsOnLeave);
-    chainFunction(window.WLROOM, 'onPlayerTeamChange', statsOnTeamChange);
-    chainFunction(window.WLROOM, 'onGameStart', statsOnGameStart);
-    chainFunction(window.WLROOM, 'onGameEnd', statsOnGameEnd);
-    // onPlayerKilled is stock — kill feed, suicides and kill-timing work on any
-    // build. onPlayerSpawn is our injected callback (exact spawn times); on a
-    // build without it the timing maps just stay empty.
-    chainFunction(window.WLROOM, 'onPlayerKilled', statsOnKilled);
-    chainFunction(window.WLROOM, 'onPlayerSpawn', statsOnSpawn);
+    // Chain ONCE per room lifetime: a hot-reload of z_stats.js alone re-runs
+    // initStats, and re-chaining would stack a second copy of every handler —
+    // every game after that double-counts kills/games/wins/ELO/duel stats.
+    // (Tradeoff: after a hot reload the chained entry points keep their old
+    // function bodies — free variables resolve to the reloaded globals, so
+    // state stays consistent, but changed handler LOGIC needs a room restart.)
+    if (!window.__Z_STATS_CHAINED) {
+        window.__Z_STATS_CHAINED = true;
+        chainFunction(window.WLROOM, 'onPlayerJoin', statsOnJoin);
+        chainFunction(window.WLROOM, 'onPlayerChat', statsOnChat);
+        chainFunction(window.WLROOM, 'onPlayerLeave', statsOnLeave);
+        chainFunction(window.WLROOM, 'onPlayerTeamChange', statsOnTeamChange);
+        chainFunction(window.WLROOM, 'onGameStart', statsOnGameStart);
+        chainFunction(window.WLROOM, 'onGameEnd', statsOnGameEnd);
+        // onPlayerKilled is stock — kill feed, suicides and kill-timing work on
+        // any build. onPlayerSpawn is our injected callback (exact spawn times);
+        // on a build without it the timing maps just stay empty.
+        chainFunction(window.WLROOM, 'onPlayerKilled', statsOnKilled);
+        chainFunction(window.WLROOM, 'onPlayerSpawn', statsOnSpawn);
 
-    // Phase 2: weapon effectiveness + damage, only on the weapon-enabled
-    // (hacked) build. onPlayerHit is our injected callback.
-    statsWeaponsEnabled = typeof window.WLROOM.getWeapons === 'function';
-    if (statsWeaponsEnabled) {
-        chainFunction(window.WLROOM, 'onPlayerHit', statsOnHit);
-        console.log('stats: weapon/damage tracking enabled');
+        // Phase 2: weapon effectiveness + damage, only on the weapon-enabled
+        // (hacked) build. onPlayerHit is our injected callback.
+        statsWeaponsEnabled = typeof window.WLROOM.getWeapons === 'function';
+        if (statsWeaponsEnabled) {
+            chainFunction(window.WLROOM, 'onPlayerHit', statsOnHit);
+            console.log('stats: weapon/damage tracking enabled');
+        }
+    } else {
+        // reload path: refresh the capability flag without re-chaining
+        statsWeaponsEnabled = typeof window.WLROOM.getWeapons === 'function';
     }
 
     // Live scoreboard: aggregates only flush at game end, so during a game the
@@ -492,8 +504,10 @@ function statsOnGameEnd() {
             } else if (loser === dp) {
                 updates[`${db}/streak`] = 0;
             } // tie: streaks unchanged
-            updates[`${db}/duelMsSum`] = statsInc(duelMs);
-            updates[`${db}/duelCount`] = statsInc(1);
+            if (duelMs > 0) { // a mid-game script reload zeroes statsGameStartTs — skip the bogus sample
+                updates[`${db}/duelMsSum`] = statsInc(duelMs);
+                updates[`${db}/duelCount`] = statsInc(1);
+            }
         }
         // head-to-head: one bounded node per PAIR, key = sorted auths; w0/w1 =
         // wins for the first/second auth in the sorted key (stable positions).
