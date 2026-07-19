@@ -1,13 +1,23 @@
 /**
- * newjohn plugin — effects library. VERBATIM port of the proven, capped
- * buildinggame implementation (buildinggame/c_effects.js + _material_init.js),
- * which fixed every defect in newjohn/effects.js: 3000px dimension caps on all
- * growing effects, indexed writes instead of O(n²) reduce(concat) (the newjohn
- * silent-freeze: a chained bigger/stretchy blocked the JS thread for minutes),
- * corrected row math (newjohn's i%x==0 fired at i=0 → sheared rows), and
- * validated half-dims (newjohn's bottom/right read past the buffer on odd
- * dims → undefined holes). Keep this file diffable against its source — edit
- * buildinggame first, then re-port.
+ * newjohn plugin — effects library. Ported from the buildinggame implementation
+ * (buildinggame/c_effects.js + _material_init.js), which already fixed the
+ * newjohn/effects.js freeze class (3000px caps on the main growers, indexed
+ * writes instead of O(n²) reduce(concat), corrected stretch/bigger row math).
+ *
+ * NO LONGER VERBATIM — executable fuzzing of the bundle found latent defects in
+ * buildinggame itself, fixed HERE and marked "PORT FIX" inline (upstream still
+ * carries them):
+ *   - bottom/right: OOB reads → undefined holes on odd dims (17% of random
+ *     5-chains!) — now keep the LAST N rows/cols, valid for every N.
+ *   - expand/double/expandrev/expandalt: primary copy was uncapped (the
+ *     source's own "//not good"), len != w*h for inputs ≥3000 wide — now a
+ *     uniform outW=min(2w,cap) shape, behavior-identical below the cap.
+ *   - addbg: per-side clamp didn't bound the SUM of opposite sides (2x cap
+ *     possible) — second side of each axis now clamps the total.
+ * Top-level decls are `var` (not const) so a hot-reload of this file alone
+ * doesn't throw "Identifier already declared".
+ * If you fix buildinggame upstream, port its changes here manually and keep the
+ * PORT FIX blocks.
  *
  * Globals introduced (verified collision-free in this bundle): MATERIAL,
  * MAT_GROUP, defaultMaterials, MatString, isColorIdxMatString, randomBG,
@@ -15,7 +25,7 @@
  * maxMaxWidthHeight, effects, effectList.
  */
 
-const MATERIAL = {
+var MATERIAL = {
     UNDEF: 0,
     DIRT: 1,
     DIRT_2: 2,    
@@ -27,22 +37,22 @@ const MATERIAL = {
     WORM: 32,
 }
 
-const MAT_GROUP = {
+var MAT_GROUP = {
     bg: [MATERIAL.BG,MATERIAL.BG_DIRT,MATERIAL.BG_DIRT_2, MATERIAL.BG_SEESHADOW],
     rock: [MATERIAL.ROCK],
     undef: [MATERIAL.UNDEF, MATERIAL.WORM],
     dirt: [MATERIAL.DIRT_2, MATERIAL.DIRT],
 }
 
-const defaultMaterials = [0, 9, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 32, 32, 32, 32, 32, 32, 32, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 9, 9, 0, 0, 1, 1, 1, 4, 4, 4, 1, 1, 1, 4, 4, 4, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 4, 4, 4, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 24, 24, 24, 24, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+var defaultMaterials = [0, 9, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 32, 32, 32, 32, 32, 32, 32, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 9, 9, 0, 0, 1, 1, 1, 4, 4, 4, 1, 1, 1, 4, 4, 4, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 4, 4, 4, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 24, 24, 24, 24, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 ];
 
 var randomBG = () => [160,161,162,163][Math.round(Math.random()*3)]
-const GreyRock = [...Array.from(Array(11).keys()).map((x)=>x+19)];
+var GreyRock = [...Array.from(Array(11).keys()).map((x)=>x+19)];
 var randomGreyRock = () => GreyRock[Math.round(Math.random()*10)]
 var randomColor = () => Math.round(Math.random()*255)
-const BrownDirt = [...Array.from(Array(7).keys()).map((x)=>x+12)];
+var BrownDirt = [...Array.from(Array(7).keys()).map((x)=>x+12)];
 var randomBrownDirt = () => BrownDirt[Math.round(Math.random()*6)]
 var MatString = {
     rock: [MATERIAL.ROCK],
@@ -164,85 +174,96 @@ var effects = {
             data:ret
         }
     },        
+    /* PORT FIX (expand family, diverges from buildinggame): the source's
+     * primary-copy loop was uncapped (its own "//not good" comment), so a
+     * source width >= the 3000 cap produced data.length != declared width*height
+     * (the mappool hook then silently dropped the transform). This uniform
+     * shape — outW = min(2w, cap), full original up to outW, second copy fills
+     * exactly the remainder — is behavior-identical for w < cap and length-
+     * consistent for every input. Only the second-copy pixel source differs
+     * between the four variants. */
     expand: function (map) /* expands with a mirrored version */ {
-        let ret = [];     
-        const maxedOutWidth=map.width*2>maxMaxWidthHeight?Math.round(maxMaxWidthHeight/2):map.width
+        let ret = [];
+        const outW = Math.min(map.width*2, maxMaxWidthHeight);
+        const firstW = Math.min(map.width, outW);
+        const restW = outW - firstW;
         for (let j = 0; j < map.height; j++ ) {
-            for (let i = 0; i<map.width; i++) {
-                
-                ret.push(map.data[(j*map.width)+i]);
-                    
+            const row = j*map.width;
+            for (let i = 0; i<firstW; i++) {
+                ret.push(map.data[row+i]);
             }
-            for (let i = map.width-1; i >= 0; i--) {
-                if(  (i+map.width)<(maxMaxWidthHeight)) { //not good
-                    ret.push(map.data[(j*map.width)+i]);
-                }    
+            for (let k = 0; k<restW; k++) { // mirrored: descending from column restW-1
+                ret.push(map.data[row+(restW-1-k)]);
             }
-        }  
-        
-        return { 
+        }
+        return {
             name: map.name,
-            width:maxedOutWidth*2,
+            width:outW,
             height:map.height,
             data:ret
         }
     },
     double: function (map) /* copies the map to the right */  {
         let ret = [];
-        const maxedOutWidth=map.width*2>maxMaxWidthHeight?Math.round(maxMaxWidthHeight/2):map.width
+        const outW = Math.min(map.width*2, maxMaxWidthHeight);
+        const firstW = Math.min(map.width, outW);
+        const restW = outW - firstW;
         for (let j = 0; j < map.height; j++ ) {
-            for (let k = 0; k <2; k++) {
-                for (let i = 0; i<map.width; i++) {
-                    if( 0==k || (i+map.width)<(maxMaxWidthHeight)) {
-                        ret.push(map.data[(j*map.width)+i]);
-                    }
-                        
-                }
+            const row = j*map.width;
+            for (let i = 0; i<firstW; i++) {
+                ret.push(map.data[row+i]);
             }
-        }  
-        return { 
+            for (let k = 0; k<restW; k++) { // copy: ascending from column 0
+                ret.push(map.data[row+k]);
+            }
+        }
+        return {
             name: map.name,
-            width:maxedOutWidth*2,
+            width:outW,
             height:map.height,
             data:ret
         }
     },
     expandrev: function (map) /* expands with a reversed version */ {
         let ret = [];
-        const maxedOutWidth=map.width*2>maxMaxWidthHeight?Math.round(maxMaxWidthHeight/2):map.width
+        const outW = Math.min(map.width*2, maxMaxWidthHeight);
+        const firstW = Math.min(map.width, outW);
+        const restW = outW - firstW;
         for (let j = 0; j < map.height; j++ ) {
-            for (let i = 0; i<map.width; i++) {
-                ret.push(map.data[(j*map.width)+i]);
+            const row = j*map.width;
+            const revrow = (map.height-j-1)*map.width;
+            for (let i = 0; i<firstW; i++) {
+                ret.push(map.data[row+i]);
             }
-            for (let i = 0; i<map.width; i++) {
-                if(  (i+map.width)<(maxMaxWidthHeight)) {
-                    ret.push(map.data[(map.height-j-1)*map.width+i]);  
-                }                      
+            for (let k = 0; k<restW; k++) { // vertically reversed: ascending
+                ret.push(map.data[revrow+k]);
             }
-        } 
-        return { 
+        }
+        return {
             name: map.name,
-            width:maxedOutWidth*2,
+            width:outW,
             height:map.height,
             data:ret
         }
     },
     expandalt: function (map) /* expands with a reversed & mirrored version */ {
         let ret = [];
-        const maxedOutWidth=map.width*2>maxMaxWidthHeight?Math.round(maxMaxWidthHeight/2):map.width
+        const outW = Math.min(map.width*2, maxMaxWidthHeight);
+        const firstW = Math.min(map.width, outW);
+        const restW = outW - firstW;
         for (let j = 0; j < map.height; j++ ) {
-            for (let i = 0; i<map.width; i++) {
-                ret.push(map.data[(j*map.width)+i]);
+            const row = j*map.width;
+            const revrow = (map.height-j-1)*map.width;
+            for (let i = 0; i<firstW; i++) {
+                ret.push(map.data[row+i]);
             }
-            for (let i = map.width-1; i >= 0; i--) {
-                if(  (i+map.width)<(maxMaxWidthHeight)) {
-                    ret.push(map.data[(map.height-j-1)*map.width+i]);  
-                }                      
+            for (let k = 0; k<restW; k++) { // reversed + mirrored: descending
+                ret.push(map.data[revrow+(restW-1-k)]);
             }
-        } 
-        return { 
+        }
+        return {
             name: map.name,
-            width:maxedOutWidth*2,
+            width:outW,
             height:map.height,
             data:ret
         }
@@ -267,15 +288,20 @@ var effects = {
     bottom: function (map, newHeight=0) /* cuts only the bottom */ {
         newHeight = parseInt(newHeight)
         if (isNaN(newHeight) || newHeight < 1 || newHeight >= map.height) {
-            newHeight = Math.round(map.height/2)
+            newHeight = Math.floor(map.height/2) || 1
         }
-
+        // PORT FIX (diverges from buildinggame): the source read rows
+        // newHeight..2*newHeight — out of bounds whenever newHeight > h/2
+        // (odd heights with the default: undefined holes → 0-bytes, hit on
+        // 17% of random 5-chains in fuzzing). Keep the LAST newHeight rows,
+        // valid for every 1<=N<height.
         let ret = [];
-        let half = (newHeight*map.width);
-        for (let j = 0; j < half; j++ ) {
-            ret.push(map.data[half+j]);      
-        }  
-        return { 
+        let start = (map.height - newHeight) * map.width;
+        let count = newHeight * map.width;
+        for (let j = 0; j < count; j++ ) {
+            ret.push(map.data[start+j]);
+        }
+        return {
             name: map.name,
             width:map.width,
             height:newHeight,
@@ -305,16 +331,19 @@ var effects = {
     right: function (map, newWidth=0)  /* cuts only the right */  {
         newWidth = parseInt(newWidth)
         if (isNaN(newWidth) || newWidth < 1 || newWidth >= map.width) {
-            newWidth = Math.round(map.width/2)
+            newWidth = Math.floor(map.width/2) || 1
         }
-
+        // PORT FIX (diverges from buildinggame): the source offset was
+        // newWidth (crossed into the next row + 1 OOB read on odd widths).
+        // Keep the LAST newWidth columns, valid for every 1<=N<width.
         let ret = [];
+        let off = map.width - newWidth;
         for (let j = 0; j < map.height; j++ ) {
             for (let i = 0; i<newWidth; i++) {
-                ret.push(map.data[(j*map.width)+newWidth+i]);
+                ret.push(map.data[(j*map.width)+off+i]);
             }
-        } 
-        return { 
+        }
+        return {
             name: map.name,
             width:newWidth,
             height:map.height,
@@ -783,7 +812,16 @@ var effects = {
         right = validatePixelValue(right, map.width)
         bottom = validatePixelValue(bottom, map.height)
         left = validatePixelValue(left, map.width)
-        
+        // PORT FIX (diverges from buildinggame): validatePixelValue bounds each
+        // side against HALF the map dimension (r + c/2 <= cap), so a single side
+        // could already exceed the cap (350 + 2825 = 3175) and both sides
+        // together reached ~2x cap (addbg:2900:...:2900 on 504x350 → 6000²).
+        // Clamp each axis sequentially so map + both sides never exceeds the cap.
+        top = Math.min(top, Math.max(0, maxMaxWidthHeight - map.height))
+        bottom = Math.min(bottom, Math.max(0, maxMaxWidthHeight - map.height - top))
+        left = Math.min(left, Math.max(0, maxMaxWidthHeight - map.width))
+        right = Math.min(right, Math.max(0, maxMaxWidthHeight - map.width - left))
+
 
         let ret = [];
         var y = 0;

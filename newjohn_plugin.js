@@ -116,12 +116,21 @@ var NEWJOHN_PLUGIN = (function () {
 
   async function transform(name, ab) {
     var fxs = null;
-    if (pendingFx && pendingFx.length) {
-      fxs = pendingFx; pendingFx = null; // one-shot
-    } else if (settings.autoFx > 0) {
+    if (pendingFx) {
+      // One-shot AND target-bound: a stale queue entry (its reload superseded
+      // by a newer load before the transform ran) must not fire on whatever
+      // map loads next — consume only when the names match, discard otherwise.
+      var pf = pendingFx; pendingFx = null;
+      if (pf.name === name && pf.fxs.length) fxs = pf.fxs;
+      else console.log('newjohn: discarding stale queued fx for ' + pf.name + ' (loading ' + name + ')');
+    }
+    if (!fxs && settings.autoFx > 0) {
       fxs = randomFxList(Math.min(5, settings.autoFx | 0));
     }
-    if (!fxs) return null; // no effects wanted → fork loads normally
+    if (!fxs) {
+      applyExpand(); // autoExpand is independent of effects — apply on EVERY load
+      return null;   // no effects wanted → fork loads normally
+    }
 
     var map = await decode(name, ab);
     map.name = name;
@@ -144,16 +153,6 @@ var NEWJOHN_PLUGIN = (function () {
       var sets = host.room.getSettings();
       if (sets.expandLevel !== expand) { sets.expandLevel = expand; host.room.setSettings(sets); }
     } catch (e) { console.log('newjohn: expand toggle failed: ' + e); }
-  }
-
-  function reloadCurrent(player) {
-    var name = window.currentMapName;
-    if (!name || name.substring(0, 7) === 'random#') {
-      host.announce('cannot apply effects to the current map (subpool/unknown) — use !map first', player, 0xffaa55);
-      pendingFx = null;
-      return;
-    }
-    window.loadMapByName(name); // the fork's guarded path picks up pendingFx via the hook
   }
 
   function loadSettings(conf) {
@@ -183,9 +182,14 @@ var NEWJOHN_PLUGIN = (function () {
         .filter(function (s) { return s && typeof effects[s.split(':')[0]] === 'function'; })
         .slice(0, 5);
       if (fxs.length === 0) fxs = randomFxList(1); // FIX vs newjohn: name, not numeric index
-      pendingFx = fxs;
+      var target = window.currentMapName;
+      if (!target || target.substring(0, 7) === 'random#') {
+        host.announce('cannot apply effects to the current map (subpool/unknown) — use !map first', player, 0xffaa55);
+        return false;
+      }
+      pendingFx = { name: target, fxs: fxs }; // target-bound one-shot (see transform)
       host.announce('applying: ' + fxs.join(', '), null, 0x88ccff);
-      reloadCurrent(player);
+      window.loadMapByName(target); // the fork's guarded path picks pendingFx up via the hook
       return false;
     }, C.ADMIN_ONLY);
 
