@@ -75,6 +75,7 @@ var ARENA_PLUGIN = (function () {
     var a = playerAuth(player);
     if (a == null || this.has(a)) return false; // never queue an auth-less player (dedup key)
     this.q.push({ auth: a, name: player.name, id: player.id });
+    emitQueue();
     return true;
   };
   PlayerQueue.prototype.remove = function (player) {
@@ -83,13 +84,21 @@ var ARENA_PLUGIN = (function () {
     // by auth when resolvable, ALWAYS also by id (leave-chain order: the fork
     // deletes the auth entry before we run, so id is the reliable key there).
     this.q = this.q.filter(function (e) { return e.id !== player.id && (a == null || e.auth !== a); });
+    if (this.q.length !== before) emitQueue();
     return this.q.length !== before;
   };
   PlayerQueue.prototype.cleanQueue = function () {
+    var before = this.q.length;
     this.q = this.q.filter(function (e) { return host.room.getPlayer(e.id) != null; });
+    if (this.q.length !== before) emitQueue(); // ghost pruned → viewers see it
   };
   PlayerQueue.prototype.isEmpty = function () { this.cleanQueue(); return this.q.length === 0; };
-  PlayerQueue.prototype.shift = function () { this.cleanQueue(); return this.q.shift(); };
+  PlayerQueue.prototype.shift = function () {
+    this.cleanQueue();
+    var e = this.q.shift();
+    if (e) emitQueue();
+    return e;
+  };
   PlayerQueue.prototype.getNextPlayer = function () { return this.isEmpty() ? null : this.q[0]; };
   PlayerQueue.prototype.getPlace = function (player) {
     this.cleanQueue();
@@ -146,6 +155,23 @@ var ARENA_PLUGIN = (function () {
   var playerqueue = null;
   var outQueue = null;
   var gameLive = false; // arena's currentGame!=null gate: scores only for games that STARTED full
+  var lastQueueJson = ''; // dedup: cleanQueue churn must not spam identical snapshots
+
+  // ONE emission choke point (spec: game-history.md §5): every queue/seat
+  // change funnels here; wlhl captures the marker and pushes it over the host
+  // link → ext-proxy SSE → the public stats page's live queue widget. Names
+  // only — no auth ids leave the room. Fire-and-forget.
+  function emitQueue() {
+    if (!host) return;
+    try {
+      var playing = host.getActivePlayers().map(function (p) { return { name: p.name }; });
+      var queue = playerqueue ? playerqueue.q.map(function (e) { return { name: e.name }; }) : [];
+      var snap = JSON.stringify({ playing: playing, queue: queue });
+      if (snap === lastQueueJson) return;
+      lastQueueJson = snap;
+      console.log('@@QUEUE@@ ' + JSON.stringify({ playing: playing, queue: queue, updatedAt: Date.now() }));
+    } catch (e) {}
+  }
 
   function resolveInfo(p) { return { name: p.name, auth: playerAuth(p), id: p.id }; }
 
@@ -264,6 +290,7 @@ var ARENA_PLUGIN = (function () {
         room.restartGame();
       }
       setLock(full); // SAFEGUARD: teamsLocked tracks fullness
+      emitQueue();   // a playing leaver changes the playing set without touching the queue
     });
 
     // onPlayerTeamChange — SAFEGUARDS: lock tracking; a player who entered the
@@ -272,6 +299,7 @@ var ARENA_PLUGIN = (function () {
     chain(room, 'onPlayerTeamChange', function (p, bp) {
       setLock(isFull());
       if (p.team !== 0) playerqueue.remove(p);
+      emitQueue(); // seat changed — the "playing" side of the snapshot moved
       if (bp !== null && bp !== undefined && isFull()) {
         console.log('arena: restarting game to get correct start score');
         room.restartGame();
@@ -328,6 +356,7 @@ var ARENA_PLUGIN = (function () {
     }, C.FOR_ALL);
 
     setLock(isFull()); // establish lock state at boot
+    emitQueue();       // initial snapshot for the live-queue widget
   }
 
   return { manifest: manifest, init: init, loadSettings: loadSettings };

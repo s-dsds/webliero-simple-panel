@@ -199,7 +199,8 @@ function statsAddParticipant(player, midSession) {
         // snapshot the score at the moment we start tracking them; deltas from here
         scoreStart: sc.score, killsStart: sc.kills, deathsStart: sc.deaths,
         elo: STATS_COLD_ELO, form: [], midSession: !!midSession,
-        streak: 0, bestStreak: 0, fastestWinMs: 0
+        streak: 0, bestStreak: 0, fastestWinMs: 0,
+        team: (player.team != null ? player.team : null) // captured NOW — a leaver is gone from getPlayerList at game end
     });
     statsSeedParticipant(a, player.id);
 }
@@ -540,6 +541,38 @@ function statsOnGameEnd() {
     } else {
         statsUpdateNoIncrement(updates);   // read-modify-write fallback
     }
+
+    // @@GAME@@ emission → wlhl gamestore (spec: game-history.md §1). Console
+    // line only — no RTDB write; per-game rows belong on the host's disk.
+    // Fire-and-forget: history emission must never touch the game loop.
+    try {
+        var emitPlayers = parts.map(function (p) {
+            var e = { auth: p.auth, name: p.name, team: (p.team != null ? p.team : null),
+                      score: p.dScore, kills: p.dKills, deaths: p.dDeaths };
+            if (p.midSession || N < 2) {
+                e.partial = true; // rank/elo are undefined for these — omit
+            } else {
+                e.rank = p.rank; e.elo = p.newElo; e.eloDelta = p.newElo - p.elo;
+            }
+            return e;
+        });
+        var emitWinner = null;
+        if (N >= 2) {
+            // statsAssignRanks averages ties (a top tie yields rank 1.5), so a
+            // single rank===1 player is THE winner; anything else = null.
+            var tops = full.filter(function (p) { return p.rank === 1; });
+            if (tops.length === 1) emitWinner = tops[0].auth;
+        }
+        console.log('@@GAME@@ ' + JSON.stringify({
+            ts: now,
+            map: (typeof statsCurrentLevelName === 'function' && statsCurrentLevelName()) || '',
+            n: N,
+            durationMs: statsGameStartTs > 0 ? (now - statsGameStartTs) : 0, // 0 = spanned a script reload
+            players: emitPlayers,
+            winner: emitWinner,
+            partial: N < 2
+        }));
+    } catch (e) { console.log('stats: game emission failed: ' + ((e && e.message) || e)); }
 
     statsParticipants.clear();
 }
