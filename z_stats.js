@@ -515,6 +515,12 @@ function statsOnGameEnd() {
         var pa = [statsSafeKey(d0.auth), statsSafeKey(d1.auth)].sort();
         var hb = `h2h/${pa[0]}__${pa[1]}`;
         updates[`${hb}/games`] = statsInc(1);
+        // Store the RAW auth pair too (absolute, same every game): the key is
+        // built from safe-keyed auths joined by "__", but an auth can itself
+        // contain "__" — readers must not have to parse the key.
+        var raw0 = statsSafeKey(d0.auth) === pa[0] ? d0.auth : d1.auth;
+        updates[`${hb}/a0`] = raw0;
+        updates[`${hb}/a1`] = raw0 === d0.auth ? d1.auth : d0.auth;
         if (winner) {
             updates[`${hb}/${statsSafeKey(winner.auth) === pa[0] ? 'w0' : 'w1'}`] = statsInc(1);
         }
