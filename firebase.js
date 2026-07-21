@@ -90,7 +90,15 @@ function loadnewAdmin(childSnapshot) {
 	var k = childSnapshot.key;
 
   loadAdmin(k,v);
-  
+
+  // Promote LIVE if the player is currently online — without this, an admin
+  // granted from the panel had to REJOIN before the engine flag (and thus the
+  // command registry's admin tier) applied.
+  try {
+    var pid = getPlayerIdFromAuth(k);
+    if (pid != null) { window.WLROOM.setPlayerAdmin(pid, true); }
+  } catch (e) { console.log("live admin promote failed: " + e); }
+
   console.log("admin `"+k+"`: `"+v.name+"` has been added to memory");
   notifyAdmins("admin `"+k+"`: `"+v.name+"` has been added to memory");
 }
