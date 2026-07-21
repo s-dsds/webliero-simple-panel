@@ -545,6 +545,9 @@ function statsOnGameEnd() {
     // @@GAME@@ emission → wlhl gamestore (spec: game-history.md §1). Console
     // line only — no RTDB write; per-game rows belong on the host's disk.
     // Fire-and-forget: history emission must never touch the game loop.
+    // Skip empty games (no participants at all — e.g. a lone spectator's map
+    // rotation): the store rejects them anyway, this just avoids log noise.
+    try { if (parts.length === 0) { statsParticipants.clear(); return; } } catch (e) {}
     try {
         var emitPlayers = parts.map(function (p) {
             var e = { auth: p.auth, name: p.name, team: (p.team != null ? p.team : null),
