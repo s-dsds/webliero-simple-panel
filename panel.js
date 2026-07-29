@@ -70,6 +70,12 @@ function writePanelMeta() {
     if (typeof statsRootRef !== 'undefined' || typeof initStats === 'function') {
         meta.stats = 1;
     }
+    // leagues.js shipped and wrapped loadSettings; advertise the Leagues tab.
+    // (writePanelMeta SETs the whole node, so the flag must live here — a
+    // leagues.js-side update() gets wiped by this set.)
+    if (window.__LEAGUE_WRAPPED) {
+        meta.leagues = 1;
+    }
     // Survive a panel.js hot-reload: onRoomLink won't re-fire, so carry the
     // link we already know instead of wiping it with the meta.set below.
     if (window.panelRoomLink) {

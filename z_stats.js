@@ -242,10 +242,19 @@ function statsCaptureMod() {
     statsGameModKey = name.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_").slice(0, 80) || "default";
 }
 
+// League capture mirrors mod capture: once per game at start — a queued league
+// switch applies at the next game start anyway (arena-leagues.md §7).
+var statsGameLeague = null; // {id, name} | null
+function statsCaptureLeague() {
+    var l = window.leagueCurrent;
+    statsGameLeague = (l && l.id) ? { id: String(l.id).slice(0, 40), name: String(l.name || l.id).slice(0, 80) } : null;
+}
+
 function statsOnGameStart() {
     statsGameInProgress = true;
     statsGameStartTs = Date.now();
     statsCaptureMod();
+    statsCaptureLeague();
     statsParticipants.clear();
     // reset per-game weapon/damage accumulators
     statsDmgDealt.clear(); statsDmgTaken.clear();
@@ -505,6 +514,15 @@ function statsOnGameEnd() {
         }
     }
 
+    // League index — UNCONDITIONAL (unlike the mods index above, which sits in
+    // the weapons-enabled branch and skips hit-less games): "games increments
+    // once per game" is a phase-5 assertion (arena-leagues.md §7.3).
+    if (statsGameLeague) {
+        updates[`leagues/${statsGameLeague.id}/name`] = statsGameLeague.name;
+        updates[`leagues/${statsGameLeague.id}/lastUsed`] = Date.now();
+        updates[`leagues/${statsGameLeague.id}/games`] = statsInc(1);
+    }
+
     // suicides + timing aggregates (kept as sum+count so avgs are exact across
     // games). avg time-to-death = lifeSum/lifeCount, etc. Rendered by the panel.
     for (var se of statsSuicides.entries()) if (se[1]) updates[`players/${se[0]}/suicides`] = statsInc(se[1]);
@@ -618,7 +636,10 @@ function statsOnGameEnd() {
             durationMs: statsGameStartTs > 0 ? (now - statsGameStartTs) : 0, // 0 = spanned a script reload
             players: emitPlayers,
             winner: emitWinner,
-            partial: N < 2
+            partial: N < 2,
+            // league is stored verbatim in gamestore raw from day one; the
+            // /games API surfaces it only after the phase-5 wlhl change
+            league: statsGameLeague ? statsGameLeague.id : null
         }));
     } catch (e) { console.log('stats: game emission failed: ' + ((e && e.message) || e)); }
 
