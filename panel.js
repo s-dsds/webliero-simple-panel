@@ -99,6 +99,13 @@ async function getPanelModData(url) {
     return data;
 }
 
+// Human-readable mod identity: catalog name ("Jerac/DooM.zip") as-is, else
+// the url's file name. Strips the .zip for display.
+function panelModDisplayName(v) {
+    let n = v.name || String(v.url || '').split('/').pop() || 'unknown';
+    return n.replace(/\.zip$/i, '');
+}
+
 function resolvePanelModUrl(v) {
     if (v.url) {
         return v.url;
@@ -145,6 +152,9 @@ async function applyPanelMod(v) {
 
     window.WLROOM.loadMod(data);
     lastAppliedModKey = modKey;
+    // Advertise the active mod for consumers that bucket by mod (z_stats
+    // per-mod weapon stats): a readable display name, not the full url.
+    window.panelCurrentMod = { name: panelModDisplayName(v) };
     console.log("panel: mod loaded", modUrl);
 
     if (typeof window.WLROOM.getWeapons == 'function') {

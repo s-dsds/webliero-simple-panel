@@ -226,9 +226,26 @@ function statsSeedParticipant(a, id) {
 
 var statsGameStartTs = 0; // for duel duration / fastest-win (1v1 extras)
 
+// Per-mod weapon buckets: "BAZOOKA" in one mod is not the same weapon as in
+// another, so weapon stats/medals are additionally bucketed by the mod the
+// game STARTED with (captured once per game — a queued mid-game mod switch
+// applies at the next game start anyway). panel.js sets window.panelCurrentMod
+// when it applies a mod; before any panel mod, the room runs its default.
+var statsGameModKey = "default";
+var statsGameModName = "default";
+function statsCaptureMod() {
+    var m = window.panelCurrentMod;
+    var name = (m && m.name) ? String(m.name) : "default";
+    statsGameModName = name.slice(0, 80);
+    // key charset matches ext-proxy's rtdbKeyRe (readers pass it as ?mod=):
+    // strictly [A-Za-z0-9_-], everything else folded to "_"
+    statsGameModKey = name.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_").slice(0, 80) || "default";
+}
+
 function statsOnGameStart() {
     statsGameInProgress = true;
     statsGameStartTs = Date.now();
+    statsCaptureMod();
     statsParticipants.clear();
     // reset per-game weapon/damage accumulators
     statsDmgDealt.clear(); statsDmgTaken.clear();
@@ -449,12 +466,21 @@ function statsOnGameEnd() {
         for (var te of statsDmgTaken.entries()) {
             if (te[1] > 0) updates[`players/${te[0]}/damageTaken`] = statsInc(Math.round(te[1]));
         }
+        // Weapon rows are written twice: the legacy all-mods nodes (weapons/,
+        // players/<auth>/weapons/) keep the overall boards + old readers
+        // working, and the per-mod buckets (weaponsByMod/<modKey>/,
+        // players/<auth>/weaponsByMod/<modKey>/) split them by the mod this
+        // game ran — a BAZOOKA kill under one mod says nothing about another's.
+        var mk = statsGameModKey;
         for (var we of statsWpnByAuth.entries()) {
             var wAuth = we[0];
             for (var wf of we[1].entries()) {
                 var pb = `players/${wAuth}/weapons/${wf[0]}`;
                 if (wf[1].kills) updates[`${pb}/kills`] = statsInc(wf[1].kills);
                 if (wf[1].damage) updates[`${pb}/damage`] = statsInc(Math.round(wf[1].damage));
+                var pmb = `players/${wAuth}/weaponsByMod/${mk}/${wf[0]}`;
+                if (wf[1].kills) updates[`${pmb}/kills`] = statsInc(wf[1].kills);
+                if (wf[1].damage) updates[`${pmb}/damage`] = statsInc(Math.round(wf[1].damage));
             }
         }
         for (var ge of statsWpnGlobal.entries()) {
@@ -462,8 +488,21 @@ function statsOnGameEnd() {
             updates[`${gb}/name`] = ge[1].name;
             if (ge[1].kills) updates[`${gb}/kills`] = statsInc(ge[1].kills);
             if (ge[1].damage) updates[`${gb}/damage`] = statsInc(Math.round(ge[1].damage));
+            var gmb = `weaponsByMod/${mk}/${ge[0]}`;
+            updates[`${gmb}/name`] = ge[1].name;
+            if (ge[1].kills) updates[`${gmb}/kills`] = statsInc(ge[1].kills);
+            if (ge[1].damage) updates[`${gmb}/damage`] = statsInc(Math.round(ge[1].damage));
         }
-        for (var fp of statsWpnSeen) updates[`weapons/${fp}/games`] = statsInc(1);
+        for (var fp of statsWpnSeen) {
+            updates[`weapons/${fp}/games`] = statsInc(1);
+            updates[`weaponsByMod/${mk}/${fp}/games`] = statsInc(1);
+        }
+        if (statsWpnSeen.size) {
+            // mods index for the stats-page selector
+            updates[`mods/${mk}/name`] = statsGameModName;
+            updates[`mods/${mk}/lastUsed`] = Date.now();
+            updates[`mods/${mk}/games`] = statsInc(1);
+        }
     }
 
     // suicides + timing aggregates (kept as sum+count so avgs are exact across
