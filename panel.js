@@ -42,6 +42,16 @@ function initPanel() {
     });
 
     writePanelMeta();
+
+    // Liveness heartbeat: readers (owner room list, public stats page, panel
+    // header) hide the join link when this stops advancing — meta.roomlink
+    // used to outlive the room forever, leaving dead join links everywhere.
+    // 60s cadence; readers use a 3-minute staleness window. There is no
+    // shutdown hook to clear the link, so a heartbeat is the only signal.
+    setInterval(() => {
+        panelMetaRef.update({ alive: Date.now() });
+    }, 60 * 1000);
+
     console.log('panel ok');
 }
 initPanel();
@@ -50,7 +60,8 @@ function writePanelMeta() {
     let meta = {
         contractVersion: 1,
         panel: "webliero-simple-panel",
-        updatedAt: Date.now()
+        updatedAt: Date.now(),
+        alive: Date.now()
     };
     if (typeof window.WLROOM.getWeapons == 'function') {
         meta.weapons = true;
