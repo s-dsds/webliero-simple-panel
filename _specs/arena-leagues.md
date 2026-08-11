@@ -136,7 +136,10 @@ literally "promode ± one flag". One level keeps the Go validator to a *one-leve
 merge* instead of a resolver: since each league's facets are individually valid
 and a settings merge is a key-wise union of already-valid values, the resolved
 product is valid by construction — the only thing the merge has to re-check is
-that the union still fits `validateSettings`'s 100-key cap. A recursive chain
+that the union still fits `validateSettings`'s 100-key cap. (As-built note:
+with the per-facet ≤40-key cap, a one-level union tops out at 80 keys — the
+merge re-check is defensive infrastructure, unreachable via key-count alone;
+the per-facet cap is the operative gate.) A recursive chain
 would need cycle detection, a depth cap, and a full Go resolver kept in lockstep
 with the JS one. A third variant extends the same base instead of chaining.
 Cost: a change to a common base has to be made once per base — acceptable for a
