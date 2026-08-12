@@ -73,7 +73,14 @@ var AFK_HANDLER = (function () {
         room.sendAnnouncement(`Moving ${player.name} to spectators due to inactivity`, null, 0xDDDDDD)
         const reason = `You were afk for more than ${settings.timeout / 1000} seconds, moving you to spectators`
         room.sendAnnouncement(reason, playerId, 0xFF0000, "bold", 2);
-        kickCandidates[playerId] = new Date()        
+        kickCandidates[playerId] = new Date()
+        // The arena reference called moveToGameIfSomeoneIsWaiting(true) here —
+        // an eviction must not leave a seat empty. That function lives inside
+        // the arena plugin's closure now, so notify via a hook instead; rooms
+        // without the plugin have no queue and no subscriber.
+        if (Array.isArray(window.__AFK_EVICT_HOOKS)) {
+          for (const h of window.__AFK_EVICT_HOOKS) { try { h(playerId) } catch (e) {} }
+        }
       }
     }, settings.graceTime)
   }
