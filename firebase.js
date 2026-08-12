@@ -218,6 +218,10 @@ COMMAND_REGISTRY.add("poolshuffle", ["!poolshuffle: shuffles map pool"], (player
 }, COMMAND.ADMIN_ONLY);
 
 function writeLogins(p, type ="login") {
+    // Boot window: joins can fire before initFirebase's async IIFE assigned
+    // the refs (the SDK loads over the network). A TypeError here propagates
+    // into the engine's event dispatch — skip the log row instead.
+    if (typeof loginsRef === 'undefined' || !loginsRef) return;
     const now = Date.now();
     const a = auth.get(p.id);
     loginsRef.child(now).set({name: p.name, auth:a, type:type, formatted:(new Date(now).toLocaleString())});
