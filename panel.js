@@ -48,7 +48,9 @@ function initPanel() {
     // used to outlive the room forever, leaving dead join links everywhere.
     // 60s cadence; readers use a 3-minute staleness window. There is no
     // shutdown hook to clear the link, so a heartbeat is the only signal.
-    setInterval(() => {
+    // Hot reload: don't stack intervals (same guard as z_stats/z_trace).
+    if (window.__panelAliveTimer) clearInterval(window.__panelAliveTimer);
+    window.__panelAliveTimer = setInterval(() => {
         panelMetaRef.update({ alive: Date.now() });
     }, 60 * 1000);
 
@@ -84,9 +86,17 @@ function writePanelMeta() {
     panelMetaRef.set(meta);
 }
 
+// Mod zips are multi-MB ArrayBuffers; an uncapped cache OOM-kills the tab
+// over a weeks-long room that cycles many mods (leagues make that routine).
+var PANEL_MOD_CACHE_MAX = 4;
+
 async function getPanelModData(url) {
     if (panelModCache.has(url)) {
-        return panelModCache.get(url);
+        // LRU touch: re-insert so the entry moves to the back of the Map
+        var hit = panelModCache.get(url);
+        panelModCache.delete(url);
+        panelModCache.set(url, hit);
+        return hit;
     }
     let data;
     try {
@@ -100,6 +110,9 @@ async function getPanelModData(url) {
         data = await res.arrayBuffer();
     } catch (e) {
         return null;
+    }
+    while (panelModCache.size >= PANEL_MOD_CACHE_MAX) {
+        panelModCache.delete(panelModCache.keys().next().value); // evict LRU
     }
     panelModCache.set(url, data);
     return data;
@@ -143,9 +156,19 @@ async function applyPanelMod(v) {
     if (modKey === lastAppliedModKey) {
         return;
     }
+    // Advertise the incoming mod SYNCHRONOUSLY, before any await: z_stats'
+    // statsCaptureMod reads window.panelCurrentMod in the same onGameStart
+    // chain that triggers a deferred (applyAt:nextGame) apply. The async load
+    // lands milliseconds into the new game, which is played on the NEW mod —
+    // capturing after the awaits bucketed that whole game under the outgoing
+    // mod. Reverted below if the load fails (old mod keeps running; the rare
+    // fetch-failure game may then carry the wrong label — the benign corner).
+    let prevMod = window.panelCurrentMod;
+    window.panelCurrentMod = { name: panelModDisplayName(v) };
     let modUrl = resolvePanelModUrl(v);
     let data = await getPanelModData(modUrl);
     if (!data) {
+        window.panelCurrentMod = prevMod;
         console.log("panel: mod could not be loaded", modUrl);
         return;
     }
@@ -158,9 +181,6 @@ async function applyPanelMod(v) {
 
     window.WLROOM.loadMod(data);
     lastAppliedModKey = modKey;
-    // Advertise the active mod for consumers that bucket by mod (z_stats
-    // per-mod weapon stats): a readable display name, not the full url.
-    window.panelCurrentMod = { name: panelModDisplayName(v) };
     console.log("panel: mod loaded", modUrl);
 
     if (typeof window.WLROOM.getWeapons == 'function') {

@@ -541,12 +541,16 @@ COMMAND_REGISTRY.add(["deladmin","da"], ["!deladmin #auth: removes an admin"], (
             a = auth.get(p.id)        
         }
     }
-    if (!admins.get(a)) {
-        announce(`${a} is not perm admin`)
+    const rec = admins.get(a)
+    if (!rec) {
+        announce(`${a} is not perm admin`, player)
         return false
     }
-    if (isSuperAdmin(admins.get(a))) {
-        announce(`${a} cannot delete a super admin`)
+    // check the admin RECORD's super flag directly: isSuperAdmin() expects a
+    // live player object (it resolves auth.get(player.id)), so passing the
+    // record made this guard always-false — super admins were deletable.
+    if (rec.super) {
+        announce(`${a} cannot delete a super admin`, player)
         return false
     }
     try {

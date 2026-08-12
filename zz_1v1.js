@@ -28,7 +28,14 @@ chainFunction(window.WLROOM, 'onPlayerLeave', function(player) {
 )
 
 function announce(msg, player, color, style) {
-	window.WLROOM.sendAnnouncement(msg, typeof player =='undefined' || player == null?null:player.id, color!=null?color:0xb2f1d3, style !=null?style:"", 1);
+	// Accept a player OBJECT or a numeric player id: several callers pass
+	// player.id, and `id.id` is undefined — which sendAnnouncement treats as
+	// broadcast-to-all, leaking private replies (and !listadmins' auth list)
+	// to the whole room.
+	var target = null;
+	if (typeof player == 'number') target = player;
+	else if (player != null && typeof player.id == 'number') target = player.id;
+	window.WLROOM.sendAnnouncement(msg, target, color!=null?color:0xb2f1d3, style !=null?style:"", 1);
 }
 
 function notifyAdmins(msg, logNotif = false) {

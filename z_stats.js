@@ -180,7 +180,18 @@ function statsOnTeamChange(player) {
 function statsOnLeave(player) {
     var since = statsTeamSince.get(player.id);
     if (since != null) { statsFlushPlaytime(player.id, since); statsTeamSince.delete(player.id); }
-    // keep the participant entry (with its snapshotted auth) so game-end still credits a mid-game leaver
+    // keep the participant entry (with its snapshotted auth) so game-end still
+    // credits a mid-game leaver — and snapshot their score NOW: at game end
+    // they're gone from getPlayerList, and falling back to the game-START
+    // snapshot zeroed everything they earned this game (wrong ranks/ELO/h2h).
+    var pc = statsParticipants.get(player.id);
+    if (pc) {
+        pc.left = true;
+        try {
+            var sc = window.WLROOM.getPlayerScore(player.id);
+            if (sc) pc.scoreLeave = { score: sc.score, kills: sc.kills, deaths: sc.deaths };
+        } catch (e) { }
+    }
 }
 
 function statsFlushPlaytime(id, since) {
@@ -228,9 +239,11 @@ var statsGameStartTs = 0; // for duel duration / fastest-win (1v1 extras)
 
 // Per-mod weapon buckets: "BAZOOKA" in one mod is not the same weapon as in
 // another, so weapon stats/medals are additionally bucketed by the mod the
-// game STARTED with (captured once per game — a queued mid-game mod switch
-// applies at the next game start anyway). panel.js sets window.panelCurrentMod
-// when it applies a mod; before any panel mod, the room runs its default.
+// game STARTED with (captured once per game). panel.js sets
+// window.panelCurrentMod SYNCHRONOUSLY at the top of applyPanelMod — its
+// onGameStart handler runs earlier in this same chain, so a deferred
+// (applyAt:nextGame) switch is already advertised when we capture here.
+// Before any panel mod, the room runs its default.
 var statsGameModKey = "default";
 var statsGameModName = "default";
 function statsCaptureMod() {
@@ -426,6 +439,7 @@ function statsOnGameEnd() {
         statsComputeElo(full, N);            // sets p.newElo
     }
 
+    var newToday = 0; // distinct auths first seen today, counted THIS game
     for (var p of parts) {
         var base = `players/${p.auth}`;
         // activity credit for ALL participants
@@ -454,8 +468,8 @@ function statsOnGameEnd() {
         if (form.length > STATS_FORM_CAP) form = form.slice(form.length - STATS_FORM_CAP);
         updates[`${base}/form`] = form;
 
-        // daily uniques (approx)
-        if (!statsSeenToday.has(p.auth)) statsSeenToday.add(p.auth);
+        // daily uniques (approx): count each auth once per day
+        if (!statsSeenToday.has(p.auth)) { statsSeenToday.add(p.auth); newToday++; }
     }
 
     // between-game accrued joins/chat for ANY auth
@@ -592,12 +606,17 @@ function statsOnGameEnd() {
         }
     }
 
-    // daily rollup + level usage
-    updates[`daily/${day}/games`] = statsInc(1);
-    updates[`daily/${day}/kills`] = statsInc(gameKills);
-    updates[`daily/${day}/uniquePlayers`] = statsInc(parts.length);
-    var lvl = statsCurrentLevelName();
-    if (lvl) updates[`levels/${statsSafeKey(lvl)}/count`] = statsInc(1);
+    // daily rollup + level usage. Participant-less rotations (a lone
+    // spectator's map cycling) are not games — the @@GAME@@ emission below
+    // already skips them; the rollup must agree or daily/games and level
+    // counts drift from the gamestore by hundreds overnight.
+    if (parts.length > 0) {
+        updates[`daily/${day}/games`] = statsInc(1);
+        updates[`daily/${day}/kills`] = statsInc(gameKills);
+        if (newToday > 0) updates[`daily/${day}/uniquePlayers`] = statsInc(newToday);
+        var lvl = statsCurrentLevelName();
+        if (lvl) updates[`levels/${statsSafeKey(lvl)}/count`] = statsInc(1);
+    }
 
     if (statsHasIncrement) {
         statsRootRef.update(updates);
@@ -652,7 +671,10 @@ function statsScoreById(pc) {
     for (var p of window.WLROOM.getPlayerList()) {
         if (auth.get(p.id) === pc.auth) { live = window.WLROOM.getPlayerScore(p.id); break; }
     }
-    return live || { score: pc.scoreStart, kills: pc.killsStart, deaths: pc.deathsStart };
+    // gone from the list: use the score snapshotted at leave time, so a
+    // mid-game leaver keeps what they earned; the start snapshot (zero
+    // deltas) remains only for entries that never got a leave snapshot.
+    return live || pc.scoreLeave || { score: pc.scoreStart, kills: pc.killsStart, deaths: pc.deathsStart };
 }
 
 function statsAssignRanks(full) {
