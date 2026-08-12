@@ -444,10 +444,14 @@ the second entry's `players/<auth>/kills` assignment silently **replaces** the
 first's instead of adding to it. (Pre-existing: today that quietly drops the
 pre-leave segment of such a player's game.) Game end therefore folds
 participants by auth first: sum `dScore`/`dKills`/`dDeaths` across segments,
-take the **last** segment's `rankScore` (in LMS the lives stock is absolute, so
-summing it would be nonsense), `midSession` only if *every* segment was
-midSession, keep the earliest `startedAt`, and take the latest exit record.
-Ranking, ELO and the emission all run on the folded list.
+`midSession` only if *every* segment was midSession, keep the earliest
+`startedAt`, and take the latest exit record. **`rankScore` folds differently
+per mode**: in **LMS** take the **last** segment's value (the lives stock is
+an absolute, so summing it would be nonsense); in every other mode `rankScore
+=== dScore` (§3), so it must be the **summed** value like `dScore` — taking
+only the last segment's would rank a folded participant on their final
+segment alone and drop everything they earned before the rejoin. Ranking, ELO
+and the emission all run on the folded list.
 
 **The `form` ring carries the per-game detail** (`z_stats.js:454-469`). The ring
 is 20 entries, rewritten absolutely each game, and `ext-proxy` passes it through

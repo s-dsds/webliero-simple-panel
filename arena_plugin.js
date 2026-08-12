@@ -20,10 +20,12 @@
  *  - Duplicate-auth kick (queue integrity) is LIVENESS-CHECKED: only kick when
  *    another CONNECTED player holds the same auth (arena kicked on any stale
  *    map entry).
- *  - detectBadRunaway was dropped (arena latent bug: bare `wasLosing` →
- *    ReferenceError on mid-game leave; and wasLosing always returned true —
- *    log-only feature, not worth carrying). Kill logging is z_stats.js's job
- *    (spec §6d: stats have ONE owner — this plugin drives no stats writes).
+ *  - detectBadRunaway was dropped and is NOT to be re-added here: its
+ *    replacement is `_specs/leaver-afk-stats-policy.md`, implemented in
+ *    z_stats.js (spec §6d: stats have ONE owner — this plugin drives no
+ *    stats writes). That spec's §9 notes arena's four restartGame() paths
+ *    (chained onPlayerLeave backfill, !q, !j into an empty seat, mid-round
+ *    manual join) as exactly why the leaver/exit tracking lives there.
  *
  * Strict opt-in via CONFIG.plugins.arena = { enabled:true, maxGames:3 }.
  */
