@@ -355,6 +355,14 @@ var ARENA_PLUGIN = (function () {
       return false;
     }, C.FOR_ALL);
 
+    // Anti-AFK eviction backfill (reference parity): arena's evictPlayer
+    // called moveToGameIfSomeoneIsWaiting(true) directly; the port dropped it
+    // (the function moved into this closure), leaving the seat EMPTY after an
+    // AFK eviction until someone joined or left. Subscribe to the hook the
+    // fork's d_anti-afk now exposes.
+    window.__AFK_EVICT_HOOKS = window.__AFK_EVICT_HOOKS || [];
+    window.__AFK_EVICT_HOOKS.push(function () { moveToGameIfSomeoneIsWaiting(true); });
+
     setLock(isFull()); // establish lock state at boot
     emitQueue();       // initial snapshot for the live-queue widget
   }

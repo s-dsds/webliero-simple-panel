@@ -47,7 +47,12 @@ const chainFunction = (object, attribute, func) => {
 	room.setSettings({
 		scoreLimit: 10,
 		timeLimit: 10,
-		gameMode: "dm",
+		// This boot block came from the arena script, whose games are LMS —
+		// "dm" was a silent drift in the port (and why LMS-specific stats
+		// bugs never showed on dm test rigs). Arena profiles should set
+		// CONFIG.gameMode = "lms"; the panel settings node can still change
+		// it at runtime.
+		gameMode: CONFIG.gameMode || "dm",
 		levelPool: "arenasBest",
 		respawnDelay: 3,
 		bonusDrops: "health",
