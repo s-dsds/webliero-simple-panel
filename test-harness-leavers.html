@@ -1,0 +1,445 @@
+<!DOCTYPE html><html><head><meta charset=utf-8></head><body><pre id="out"></pre>
+<script>
+// ---- stubs the fork globals z_stats.js / command_registry.js / command_log.js depend on ----
+var CONFIG = { room_id: 'test', stats_elo_k: 32, stats_afk_min_ms: 60, max_players: 12, pool_from_database: false };
+var baseRoomName = 'simple';
+var auth = new Map();
+function chainFunction(object, attribute, func) {
+  var original = object[attribute];
+  if (original) {
+    object[attribute] = function () {
+      var or = original.apply(object, arguments);
+      var r = func.apply(object, arguments);
+      if (false == r || false == or) return false;
+    };
+  } else {
+    object[attribute] = func;
+  }
+}
+function writeLog() {} // command_log.js dependency — no-op
+
+// capture RTDB writes. ROOT_SNAPSHOT, when set, is what statsRootRef.once('value')
+// resolves to (for the statsUpdateNoIncrement fallback path, fix #4); child
+// (players/<auth>) reads stay the default "no prior row" stub used everywhere else.
+var CAPTURED = { updates: [], sets: [] };
+var ROOT_SNAPSHOT = null;
+var ROOT_PATH = baseRoomName + '/' + CONFIG.room_id + '/stats';
+var HANG = false; // when true, .once('value') never resolves (seeded-hang scenario)
+function fakeRef(path) {
+  return {
+    _p: path,
+    child: function (c) { return fakeRef(path + '/' + c); },
+    once: function () {
+      if (HANG) return new Promise(function () {});
+      if (path === ROOT_PATH && ROOT_SNAPSHOT) return Promise.resolve({ exists: function () { return true; }, val: function () { return ROOT_SNAPSHOT; } });
+      return Promise.resolve({ exists: function () { return false; }, val: function () { return null; } });
+    },
+    set: function (v) { CAPTURED.sets.push({ path: path, v: v }); return Promise.resolve(); },
+    update: function (o) { CAPTURED.updates.push({ path: path, o: o }); return Promise.resolve(); },
+  };
+}
+var fdb = { ref: function (p) { return fakeRef(p); } };
+var firebase = { database: { ServerValue: { increment: function (n) { return { __inc: n }; } } } };
+var COLORS = { ERROR: 1, WARNING: 2, ANNOUNCE: 3, INFO: 4, PRIVATE: 5, NORMAL: 6, IMPORTANT: 7 };
+
+// ---- stub WLROOM ----
+var _players = [];   // {id, name, team, auth, score, kills, deaths}
+var _settings = { gameMode: 'dm', scoreLimit: null, level: 'test.png' };
+function setMode(mode, scoreLimit) { _settings = { gameMode: mode, scoreLimit: (scoreLimit != null ? scoreLimit : null), level: 'test.png' }; }
+var WLROOM = {
+  getPlayerList: function () { return _players.map(function (p) { return { id: p.id, name: p.name, team: p.team, auth: p.auth }; }); },
+  getPlayerScore: function (id) { var p = _players.find(function (x) { return x.id === id; }); return p ? { score: p.score, kills: p.kills, deaths: p.deaths } : null; },
+  getSettings: function () { return _settings; },
+  sendAnnouncement: function () {},
+};
+window.WLROOM = WLROOM;
+function setPlayers(list) { _players = list; list.forEach(function (p) { auth.set(p.id, p.auth); }); }
+
+// capture console.log (for the @@GAME@@ emission + "stats: exit …" lines)
+var LOGLINES = [];
+var REAL_LOG = console.log.bind(console);
+console.log = function () { LOGLINES.push(Array.prototype.slice.call(arguments).join(' ')); };
+</script>
+<script src="file:///home/qmdev/liero/webliero-simple-panel/command_registry.js"></script>
+<script src="file:///home/qmdev/liero/webliero-simple-panel/command_log.js"></script>
+<script src="file:///home/qmdev/liero/webliero-simple-panel/z_stats.js"></script>
+<script>
+var out = [];
+function log(s) { out.push(s); }
+function assert(name, cond) { log((cond ? 'PASS ' : 'FAIL ') + name); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function lastUpdate() { return CAPTURED.updates.length ? CAPTURED.updates[CAPTURED.updates.length - 1].o : {}; }
+function inc(v) { return v && typeof v === 'object' && '__inc' in v ? v.__inc : v; }
+function hasSetSuffix(suffix) { return CAPTURED.sets.some(function (s) { return s.path.indexOf(suffix) !== -1; }); }
+function lastGameEmission() {
+  for (var i = LOGLINES.length - 1; i >= 0; i--) {
+    if (LOGLINES[i].indexOf('@@GAME@@ ') === 0) return JSON.parse(LOGLINES[i].slice('@@GAME@@ '.length));
+  }
+  return null;
+}
+function findPlayer(emission, a) { return emission.players.find(function (p) { return p.auth === a; }); }
+
+(async () => {
+  await sleep(50); // let initStats()'s fdb-ready path settle
+
+  // ===== (a) LMS duel, leaver at 2 lives vs 4 → standing "losing", abandons +1 =====
+  setMode('lms', 4);
+  setPlayers([
+    { id: 101, name: 'A1', auth: 'aA1', team: 1, score: 4, kills: 0, deaths: 0 },
+    { id: 102, name: 'A2', auth: 'aA2', team: 1, score: 4, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20); // seed reads land
+  _players[0].score = 2; // A1 has lost 2 of 4 lives
+  CAPTURED.updates = []; CAPTURED.sets = [];
+  window.WLROOM.onPlayerLeave({ id: 101, name: 'A1', team: 1 });
+  window.WLROOM.onGameEnd();
+  var u = lastUpdate();
+  var em = lastGameEmission();
+  assert('(a) exits+1 for the leaver', inc(u['players/aA1/exits']) === 1);
+  assert('(a) abandons+1 for the leaver (losing, material, not afk, not eliminated)', inc(u['players/aA1/abandons']) === 1);
+  assert('(a) standing reported "losing" in @@GAME@@', em && findPlayer(em, 'aA1') && findPlayer(em, 'aA1').standing === 'losing');
+  assert('(a) mode reported "lms"', em && em.mode === 'lms');
+  assert('(a) rankScore === lives remaining for both players', em && findPlayer(em, 'aA1').rankScore === 2 && findPlayer(em, 'aA2').rankScore === 4);
+  assert('(a) score (dScore) stays 0 in LMS (unchanged from today)', em && findPlayer(em, 'aA1').score === 0 && findPlayer(em, 'aA2').score === 0);
+
+  // reverse case: leaving while WINNING → no abandon (spec's paired example)
+  setMode('lms', 4);
+  setPlayers([
+    { id: 111, name: 'B1', auth: 'aB1', team: 1, score: 4, kills: 0, deaths: 0 },
+    { id: 112, name: 'B2', auth: 'aB2', team: 1, score: 2, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  CAPTURED.updates = [];
+  window.WLROOM.onPlayerLeave({ id: 111, name: 'B1', team: 1 }); // B1 at 4 vs B2 at 2 → winning
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  em = lastGameEmission();
+  assert('(a-reverse) leaving at 4 vs 2 → standing "winning"', em && findPlayer(em, 'aB1').standing === 'winning');
+  assert('(a-reverse) abandons +0 when winning', u['players/aB1/abandons'] === undefined);
+
+  // ===== (b) tied 3v3 (tdm) leaves → abandons +1 =====
+  setMode('tdm', null);
+  setPlayers([
+    { id: 201, name: 'C1', auth: 'aC1', team: 1, score: 0, kills: 0, deaths: 0 }, // exiting player
+    { id: 202, name: 'C2', auth: 'aC2', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 203, name: 'C3', auth: 'aC3', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 204, name: 'C4', auth: 'aC4', team: 2, score: 0, kills: 0, deaths: 0 }, // ties C1
+    { id: 205, name: 'C5', auth: 'aC5', team: 2, score: 0, kills: 0, deaths: 0 },
+    { id: 206, name: 'C6', auth: 'aC6', team: 2, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  // dScore is a DELTA off scoreStart (captured at onGameStart) — scores must
+  // change AFTER start, or every participant ties at dScore=0 trivially.
+  _players[0].score = 3; _players[0].kills = 3; // C1 (exiting)
+  _players[1].score = 1; _players[1].kills = 1; // C2
+  _players[3].score = 3; _players[3].kills = 3; // C4 — ties C1
+  _players[4].score = 2; _players[4].kills = 2; // C5
+  CAPTURED.updates = [];
+  window.WLROOM.onPlayerLeave({ id: 201, name: 'C1', team: 1 });
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  em = lastGameEmission();
+  assert('(b) tied 3v3 exit → standing "tied"', em && findPlayer(em, 'aC1').standing === 'tied');
+  assert('(b) tied 3v3 exit → abandons +1', inc(u['players/aC1/abandons']) === 1);
+
+  // ===== (c) LMS leave at 0 lives (eliminated carve-out) → exits+1, abandons+0 =====
+  setMode('lms', 4);
+  setPlayers([
+    { id: 301, name: 'D1', auth: 'aD1', team: 1, score: 0, kills: 0, deaths: 4 },
+    { id: 302, name: 'D2', auth: 'aD2', team: 1, score: 3, kills: 4, deaths: 1 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  CAPTURED.updates = [];
+  window.WLROOM.onPlayerLeave({ id: 301, name: 'D1', team: 1 });
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  assert('(c) exits+1 at 0 lives', inc(u['players/aD1/exits']) === 1);
+  assert('(c) abandons+0 at 0 lives (eliminated carve-out)', u['players/aD1/abandons'] === undefined);
+
+  // ===== (d) !jq-style spec+rejoin within 5s → NOTHING recorded =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 401, name: 'E1', auth: 'aE1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 402, name: 'E2', auth: 'aE2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  CAPTURED.updates = []; CAPTURED.sets = [];
+  window.WLROOM.onPlayerTeamChange({ id: 401, name: 'E1', team: 0 }); // !q half
+  window.WLROOM.onPlayerTeamChange({ id: 401, name: 'E1', team: 1 }); // !j half, same tick
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  assert('(d) !jq → no exits written', u['players/aE1/exits'] === undefined);
+  assert('(d) !jq → no abandons written', u['players/aE1/abandons'] === undefined);
+  assert('(d) !jq → no rejoins written (same-tick, under the 5s quiet window)', u['players/aE1/rejoins'] === undefined);
+
+  // rejoin AFTER the quiet window → rejoins +1, exits +0 (record retracted, not drained)
+  setMode('dm', null);
+  setPlayers([
+    { id: 411, name: 'F1', auth: 'aF1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 412, name: 'F2', auth: 'aF2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  CAPTURED.updates = []; CAPTURED.sets = [];
+  window.WLROOM.onPlayerTeamChange({ id: 411, name: 'F1', team: 0 });
+  var rec = statsExits.get('aF1'); if (rec) rec.awayAt -= 6000; // simulate >5s away without a real sleep
+  window.WLROOM.onPlayerTeamChange({ id: 411, name: 'F1', team: 1 });
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  assert('(d-rejoin) rejoin after 5s → rejoins +1 (routed through statsPending, fix #4)', inc(u['players/aF1/rejoins']) === 1);
+  assert('(d-rejoin) rejoin after 5s → exits +0 (record retracted, never drained)', u['players/aF1/exits'] === undefined);
+
+  // ===== (e) LMS duel completes → EXACT ELO (K·(S−E)), h2h + streak written (phase 1b) =====
+  setMode('lms', 4);
+  setPlayers([
+    { id: 501, name: 'G1', auth: 'aG1', team: 1, score: 4, kills: 0, deaths: 0 },
+    { id: 502, name: 'G2', auth: 'aG2', team: 1, score: 1, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd(); // no exits — a normal finish
+  u = lastUpdate();
+  // hand-computed: both start at cold ELO 1500 (equal), so e=0.5 either way;
+  // G1 wins (rank 1 < rank 2) -> s=1, sum=(1-0.5)=0.5 -> +round(32/1*0.5)=+16
+  // G2 loses (rank 2 > rank 1) -> s=0, sum=(0-0.5)=-0.5 -> round(32/1*-0.5)=-16
+  assert('(e) LMS duel: winner ELO EXACTLY 1500+16=1516 (K=32, S=1, E=0.5)', u['players/aG1/elo'] === 1516);
+  assert('(e) LMS duel: loser ELO EXACTLY 1500-16=1484', u['players/aG2/elo'] === 1484);
+  assert('(e) LMS duel: winner streak set to 1', u['players/aG1/streak'] === 1);
+  var pair = ['aG1', 'aG2'].sort();
+  var h2hKey = Object.keys(u).find(function (k) { return k.indexOf('h2h/') === 0 && /\/(w0|w1)$/.test(k); });
+  assert('(e) LMS duel: h2h winner counter written (today: never, since dScore stayed 0)', !!h2hKey && inc(u[h2hKey]) === 1);
+
+  // ===== (f) dm duel → rankScore === dScore (regression, byte-identical numbers) =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 601, name: 'H1', auth: 'aH1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 602, name: 'H2', auth: 'aH2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  _players[0].score = 5; _players[0].kills = 5; _players[0].deaths = 1;
+  _players[1].score = 2; _players[1].kills = 2; _players[1].deaths = 5;
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  em = lastGameEmission();
+  var h1 = findPlayer(em, 'aH1'), h2 = findPlayer(em, 'aH2');
+  assert('(f) dm: rankScore === score(dScore) for the winner', h1.rankScore === h1.score);
+  assert('(f) dm: rankScore === score(dScore) for the loser', h2.rankScore === h2.score);
+  assert('(f) dm: winner ELO EXACTLY 1516 (same K·(S−E) math as (e))', u['players/aH1/elo'] === 1516);
+
+  // ===== (g) idle-all-round victim flagged afk, taintedKills computed (not injected), killer aggregates UNCHANGED =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 701, name: 'Victim', auth: 'aVIC', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 702, name: 'Killer', auth: 'aKIL', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart();
+  await sleep(20);
+  // victim NEVER produces onPlayerActivity/onPlayerHit(attacker)/onPlayerKilled(killer) — stays AFK.
+  // deaths/kills are derived FROM the loop (not injected as a final literal),
+  // so taintedKills is a genuine consequence of the onPlayerKilled events.
+  var victim = _players.find(function (p) { return p.id === 701; });
+  var killerP = _players.find(function (p) { return p.id === 702; });
+  for (var i = 0; i < 3; i++) {
+    window.WLROOM.onPlayerKilled({ id: 701, name: 'Victim' }, { id: 702, name: 'Killer' });
+    victim.deaths++;
+    killerP.kills++;
+  }
+  await sleep(80); // STATS_AFK_MIN_MS is overridden to 60ms above — let it elapse
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  em = lastGameEmission();
+  var vic = findPlayer(em, 'aVIC');
+  assert('(g) victim flagged afk in @@GAME@@', vic && vic.afk === true);
+  assert('(g) @@GAME@@ taintedKills === 3 (== deaths driven through onPlayerKilled)', em && em.taintedKills === 3);
+  assert('(g) @@GAME@@ afkCount >= 1', em && em.afkCount >= 1);
+  assert('(g) killer kills aggregate UNCHANGED (phase 1: detection only, no reversal)', inc(u['players/aKIL/kills']) === 3);
+  assert('(g) victim afkGames +1', inc(u['players/aVIC/afkGames']) === 1);
+
+  // ===== (h) QA fix #1: folded dm participant ranks on SUMMED dScore, not the last segment =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 1, name: 'X', auth: 'aX', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 2, name: 'Y', auth: 'aY', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  _players[0].score = 3; _players[0].kills = 3; // X earns 3 before leaving
+  window.WLROOM.onPlayerLeave({ id: 1, name: 'X', team: 1 });
+  _players = _players.filter(function (p) { return p.id !== 1; });
+  auth.delete(1);
+  _players.push({ id: 3, name: 'X', auth: 'aX', team: 1, score: 0, kills: 0, deaths: 0 }); auth.set(3, 'aX');
+  window.WLROOM.onPlayerJoin({ id: 3, name: 'X', team: 1, auth: 'aX' });
+  await sleep(5);
+  _players.find(function (p) { return p.id === 3; }).score = 2; // 2 more after rejoin
+  _players.find(function (p) { return p.id === 3; }).kills = 2;
+  _players.find(function (p) { return p.id === 2; }).score = 4;
+  _players.find(function (p) { return p.id === 2; }).kills = 4;
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd();
+  u = lastUpdate(); em = lastGameEmission();
+  var X = findPlayer(em, 'aX');
+  assert('(h) one row per auth after folding', em.players.length === 2);
+  assert('(h) kills summed across segments (3+2=5)', inc(u['players/aX/kills']) === 5);
+  assert('(h) dm rankScore === SUMMED dScore for a folded participant (fix #1)', X.rankScore === 5 && X.score === 5);
+  assert('(h) X correctly wins the folded game (5 > Y\'s 4)', em.winner === 'aX');
+
+  // ===== (i) kick retraction: kickedOuts +1, abandons +0 =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 11, name: 'K1', auth: 'aK1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 12, name: 'K2', auth: 'aK2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  _players[1].score = 3; _players[1].kills = 3;
+  CAPTURED.updates = [];
+  // engine order: onPlayerLeave first, then onPlayerKicked(player, reason, ban, by)
+  window.WLROOM.onPlayerLeave({ id: 11, name: 'K1', team: 1 });
+  auth.delete(11); // zz_1v1's onPlayerLeave chain clears the auth map
+  window.WLROOM.onPlayerKicked({ id: 11, name: 'K1' }, 'kicked by admin', false, { id: 12, name: 'K2' });
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  assert('(i) kickedOuts +1', inc(u['players/aK1/kickedOuts']) === 1);
+  assert('(i) abandons +0 for a kick', u['players/aK1/abandons'] === undefined);
+
+  // ===== (j) reset detector + stale-record rule + discardedRounds =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 21, name: 'R1', auth: 'aR1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 22, name: 'R2', auth: 'aR2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  _players[1].score = 3;
+  window.WLROOM.onPlayerLeave({ id: 21, name: 'R1', team: 1 });
+  _players = _players.filter(function (p) { return p.id !== 21; }); auth.delete(21);
+  CAPTURED.updates = []; LOGLINES = [];
+  window.WLROOM.onGameStart(); // arena backfill restartGame() -> reset (no onGameEnd in between)
+  await sleep(20);
+  var sawReset = LOGLINES.some(function (l) { return l.indexOf('reset detected') >= 0; });
+  _players.push({ id: 23, name: 'R3', auth: 'aR3', team: 1, score: 0, kills: 0, deaths: 0 }); auth.set(23, 'aR3');
+  window.WLROOM.onGameStart(); await sleep(20); // second reset so R3 is a full participant of the round that ends
+  window.WLROOM.onGameEnd();
+  u = lastUpdate(); em = lastGameEmission();
+  assert('(j) reset logged', sawReset);
+  assert('(j) stale exit STILL credits exits (counters drain regardless of round)', inc(u['players/aR1/exits']) === 1);
+  assert('(j) discardedRounds counter written', Object.keys(u).some(function (k) { return /discardedRounds$/.test(k); }));
+  assert('(j) stale record contributes NO @@GAME@@ player row (roundSeq guard)', !findPlayer(em, 'aR1'));
+
+  // ===== (k) seeded guard (read hangs forever) → emission omits elo (fix #5) =====
+  HANG = true;
+  setMode('dm', null);
+  setPlayers([
+    { id: 31, name: 'S1', auth: 'aS1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 32, name: 'S2', auth: 'aS2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  _players[0].score = 5; _players[0].kills = 5;
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd();
+  u = lastUpdate(); em = lastGameEmission();
+  var S1 = findPlayer(em, 'aS1');
+  assert('(k) elo NOT written to RTDB while seed hangs', u['players/aS1/elo'] === undefined);
+  assert('(k) form NOT written to RTDB while seed hangs', u['players/aS1/form'] === undefined);
+  assert('(k) kills still incremented (counters unaffected by the seed guard)', inc(u['players/aS1/kills']) === 5);
+  assert('(k) @@GAME@@ emission OMITS elo/eloDelta too (fix #5 — RTDB/SQLite must agree)', S1.elo === undefined && S1.eloDelta === undefined && S1.seeded === false);
+  HANG = false;
+
+  // ===== (l) immaterial early exit: nobody has scored → not material → no abandon =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 41, name: 'M1', auth: 'aM1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 42, name: 'M2', auth: 'aM2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  CAPTURED.updates = [];
+  window.WLROOM.onPlayerLeave({ id: 41, name: 'M1', team: 1 }); // 0-0, nothing scored -> immaterial
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  assert('(l) immaterial early exit -> exits+1', inc(u['players/aM1/exits']) === 1);
+  assert('(l) immaterial early exit -> abandons+0', u['players/aM1/abandons'] === undefined);
+
+  // ===== (m) statsGameStartTs===0 guard: a mid-round hot reload must produce NO AFK flags =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 51, name: 'N1', auth: 'aN1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 52, name: 'N2', auth: 'aN2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  statsGameStartTs = 0; // simulate the exact condition z_stats.js:655 already distrusts
+  await sleep(80); // longer than STATS_AFK_MIN_MS(60), which would otherwise flag N1
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd();
+  u = lastUpdate(); em = lastGameEmission();
+  var N1 = findPlayer(em, 'aN1');
+  assert('(m) statsGameStartTs===0 -> no afk flag in @@GAME@@ despite elapsed time', !(N1 && N1.afk));
+  assert('(m) statsGameStartTs===0 -> no afkGames counter written', u['players/aN1/afkGames'] === undefined);
+
+  // ===== (n) capability probe fed ONLY by onPlayerActivity — a kill must NOT prevent it tripping (fix #2) =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 61, name: 'P1', auth: 'aP1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 62, name: 'P2', auth: 'aP2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  statsGameStartTs = Date.now() - 61000; // simulate a 61s-old game without a real 61s wait
+  window.WLROOM.onPlayerKilled({ id: 61, name: 'P1' }, { id: 62, name: 'P2' }); // feeds statsAct, NOT statsRealActivityEvents
+  var probeStillOkBeforeEnd = statsAfkSignalOk === true;
+  window.WLROOM.onGameEnd();
+  assert('(n) probe still armed right up to game end (a kill alone does not touch statsRealActivityEvents)', probeStillOkBeforeEnd);
+  assert('(n) capability probe trips DESPITE the kill (old bug: statsAct.size masked it)', statsAfkSignalOk === false);
+  statsAfkSignalOk = true; // restore — this flag is module-level and would poison every later test otherwise
+
+  // ===== (o) statsUpdateNoIncrement fallback path for the rejoins counter (fix #4) =====
+  statsHasIncrement = false;
+  ROOT_SNAPSHOT = { players: { aO1: { rejoins: 5 } } };
+  setMode('dm', null);
+  setPlayers([
+    { id: 71, name: 'O1', auth: 'aO1', team: 1, score: 0, kills: 0, deaths: 0 },
+    { id: 72, name: 'O2', auth: 'aO2', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  window.WLROOM.onPlayerTeamChange({ id: 71, name: 'O1', team: 0 });
+  var orec = statsExits.get('aO1'); if (orec) orec.awayAt -= 6000;
+  window.WLROOM.onPlayerTeamChange({ id: 71, name: 'O1', team: 1 });
+  CAPTURED.updates = [];
+  window.WLROOM.onGameEnd();
+  await sleep(20); // statsUpdateNoIncrement is async: once('value').then(...).update(...)
+  u = lastUpdate();
+  assert('(o) no-increment fallback: rejoins READ-ADDED (5+1=6), not overwritten with 1', u['players/aO1/rejoins'] === 6);
+  statsHasIncrement = true; ROOT_SNAPSHOT = null; // restore for later tests
+
+  // ===== (p) midSession participant never abandons, even losing + material =====
+  setMode('dm', null);
+  setPlayers([
+    { id: 81, name: 'P1', auth: 'aP1full', team: 1, score: 0, kills: 0, deaths: 0 },
+  ]);
+  window.WLROOM.onGameStart(); await sleep(20);
+  _players.push({ id: 82, name: 'Q2', auth: 'aQ2mid', team: 1, score: 0, kills: 0, deaths: 0 }); auth.set(82, 'aQ2mid');
+  window.WLROOM.onPlayerJoin({ id: 82, name: 'Q2', team: 1, auth: 'aQ2mid' }); // mid-session
+  await sleep(5);
+  _players[0].score = 5; _players[0].kills = 5; // the full participant pulls well ahead
+  CAPTURED.updates = [];
+  window.WLROOM.onPlayerLeave({ id: 82, name: 'Q2', team: 1 }); // Q2 (midSession) leaves while clearly losing
+  window.WLROOM.onGameEnd();
+  u = lastUpdate();
+  assert('(p) midSession leaver -> exits+1', inc(u['players/aQ2mid/exits']) === 1);
+  assert('(p) midSession leaver -> abandons+0 even though losing+material (never "full")', u['players/aQ2mid/abandons'] === undefined);
+
+  // ===== statsIsCounterPath sanity (trap check) =====
+  assert('statsIsCounterPath: rejoins is a counter', statsIsCounterPath('players/x/rejoins') === true);
+  assert('statsIsCounterPath: cleanStreak is NOT a counter (absolute, §5 trap)', statsIsCounterPath('players/x/cleanStreak') === false);
+
+  document.getElementById('out').textContent = out.join('\n') +
+    '\n\n' + out.filter(function (x) { return x.indexOf('PASS') === 0; }).length + ' PASS / ' +
+    out.filter(function (x) { return x.indexOf('FAIL') === 0; }).length + ' FAIL';
+  document.title = out.filter(function (x) { return x.indexOf('FAIL') === 0; }).length === 0 ?
+    'ALL PASS (' + out.length + ')' : 'FAILURES: ' + out.filter(function (x) { return x.indexOf('FAIL') === 0; }).join(' ; ');
+})().catch(function (e) { document.getElementById('out').textContent = out.join('\n') + '\nTHREW: ' + (e && e.stack || e); document.title = 'THREW'; });
+</script></body></html>
