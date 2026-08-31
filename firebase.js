@@ -5,7 +5,7 @@ var modsRef;
 var loginsRef;
 var playersRef;
 var adminsRef;
-var baseRoomName="simple";
+var baseRoomName=(typeof CONFIG!=="undefined"&&CONFIG.baseRoomName)||"simple";
 var admins = new Map();
 var poolRef;
 var settingsRef;
