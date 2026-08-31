@@ -1,0 +1,296 @@
+<!DOCTYPE html><html><head><meta charset=utf-8></head><body><pre id="out"></pre>
+<script>
+// test-harness-social.html — hidden admins, firebase motd/eastereggs/vips,
+// AFK spectator purge (queue/vip/chat exemptions), arena queue theater.
+// Run:  chrome --headless=new --no-sandbox --virtual-time-budget=30000 --dump-dom file://$PWD/test-harness-social.html
+// Verdict in <title>: SOCIAL_OK / SOCIAL_FAIL(n). Loads the REAL fork files.
+
+// ---- global stubs (what _init.js / _conf.js / other files provide) ----
+var CONFIG = { room_id: 'test', max_players: 99, pool_from_database: true,
+               motd: 'cfg motd line', discord_invite: 'https://discord.gg/x' };
+var auth = new Map();
+var conn = new Map();
+function chainFunction(object, attribute, func) {
+  var original = object[attribute];
+  if (original) {
+    object[attribute] = function () {
+      var or = original.apply(object, arguments);
+      var r = func.apply(object, arguments);
+      if (false == r || false == or) return false;
+    };
+  } else { object[attribute] = func; }
+}
+var COMMAND = { SUPER_ADMIN_ONLY: 2, ADMIN_ONLY: 1, FOR_ALL: 0 };
+var COLORS = { ERROR: 1, WARNING: 2, ROOM_ANNOUNCE: 3, ANNOUNCE: 4, ANNOUNCE_BRIGHT: 5, INFO: 6, PRIVATE: 7, NORMAL: 8, IMPORTANT: 9 };
+var REGISTRY = new Map(); // name -> {f, perm}
+var COMMAND_REGISTRY = {
+  add: function (name, usage, func, perm) {
+    (Array.isArray(name) ? name : [name]).forEach(function (n) { REGISTRY.set(n, { f: func, perm: perm }); });
+  },
+  remove: function () {},
+};
+// fake RTDB (mappool's initPoolPanel + firebase.js listeners run against it)
+function fakeRef(path) {
+  return {
+    _p: path,
+    child: function (c) { return fakeRef(path + '/' + c); },
+    once: function () { return Promise.resolve({ exists: function () { return false; }, val: function () { return null; } }); },
+    on: function () {}, off: function () {},
+    set: function () { return Promise.resolve(); },
+    update: function () { return Promise.resolve(); },
+    push: function () { return Promise.resolve(); },
+  };
+}
+// NOTE: firebase.js declares `var fdb;` — harness assigns it after load.
+
+// ---- stub WLROOM (live objects so team changes are visible) ----
+var _players = []; // {id,name,team,auth,conn,admin}
+var ANN = [];      // {msg,target,color,style,sound}
+var PROMOTED = []; // {id,flag}
+var KICKED = [];   // {id,reason}
+var WLROOM = {
+  getPlayerList: function () { return _players; },
+  getPlayer: function (id) { return _players.find(function (p) { return p.id === id; }) || null; },
+  getPlayerScore: function (id) { var p = WLROOM.getPlayer(id); return p ? { score: p.score || 0, kills: 0, deaths: 0 } : null; },
+  getSettings: function () { return { teamsLocked: false }; },
+  setSettings: function () {},
+  sendAnnouncement: function (msg, target, color, style, sound) { ANN.push({ msg: String(msg), target: target, color: color, style: style, sound: sound }); },
+  setPlayerAdmin: function (id, flag) { PROMOTED.push({ id: id, flag: flag }); var p = WLROOM.getPlayer(id); if (p) p.admin = flag; },
+  setPlayerTeam: function (id, team) { var p = WLROOM.getPlayer(id); if (p) { var from = p.team; p.team = team; if (WLROOM.onPlayerTeamChange) WLROOM.onPlayerTeamChange(p, null); } },
+  kickPlayer: function (id, reason) {
+    KICKED.push({ id: id, reason: reason });
+    var p = WLROOM.getPlayer(id);
+    _players = _players.filter(function (x) { return x.id !== id; });
+    if (p && WLROOM.onPlayerLeave) WLROOM.onPlayerLeave(p);
+  },
+  restartGame: function () {},
+  clearBans: function () {},
+};
+window.WLROOM = WLROOM;
+function joinPlayer(p) { p.team = p.team || 0; _players.push(p); if (WLROOM.onPlayerJoin) WLROOM.onPlayerJoin(p); return p; }
+function leavePlayer(p) { _players = _players.filter(function (x) { return x.id !== p.id; }); if (WLROOM.onPlayerLeave) WLROOM.onPlayerLeave(p); }
+</script>
+<script src="./states.js"></script>
+<script src="./d_anti-afk.js"></script>
+<script src="./d_anti-afkinit.js"></script>
+<script src="./firebase.js"></script>
+<script>
+// firebase.js loaded: neutralize the real network init, wire the fake fdb.
+initFirebase = function () {};
+fdb = { ref: function (p) { return fakeRef(p); } };
+</script>
+<script src="./zz_1v1.js"></script>
+<script src="./mappool.js"></script>
+<script src="./_pluginhost.js"></script>
+<script src="./arena_plugin.js"></script>
+<script>
+var RESULTS = [];
+function check(name, cond, extra) {
+  RESULTS.push({ name: name, ok: !!cond });
+  document.getElementById('out').textContent += (cond ? 'PASS ' : 'FAIL ') + name + (extra ? '  [' + extra + ']' : '') + '\n';
+}
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function lastAnnMatching(sub) { for (var i = ANN.length - 1; i >= 0; i--) if (ANN[i].msg.indexOf(sub) >= 0) return ANN[i]; return null; }
+
+(async function () {
+try {
+  // ══ 1. hidden admins ══
+  loadAdmin('visauth', { name: 'vis' });
+  loadAdmin('hidauth', { name: 'hid', hidden: true, super: true });
+  check('loadAdmin keeps hidden flag', admins.get('hidauth').hidden === true && admins.get('visauth').hidden === false);
+
+  PROMOTED.length = 0;
+  var vis = joinPlayer({ id: 1, name: 'Vis', auth: 'visauth' });
+  check('visible admin promoted at join', PROMOTED.some(function (x) { return x.id === 1 && x.flag === true; }));
+
+  PROMOTED.length = 0;
+  var hid = joinPlayer({ id: 2, name: 'Hid', auth: 'hidauth' });
+  check('hidden admin NOT promoted at join', !PROMOTED.some(function (x) { return x.id === 2; }));
+
+  // !a self-promote (mappool registration)
+  check('!admin and !a both registered', REGISTRY.has('admin') && REGISTRY.has('a') && REGISTRY.get('a').perm === COMMAND.FOR_ALL);
+  PROMOTED.length = 0;
+  REGISTRY.get('a').f(hid);
+  check('hidden admin promoted via !a', PROMOTED.some(function (x) { return x.id === 2 && x.flag === true; }));
+
+  // ══ 2. motd node ══
+  ANN.length = 0;
+  var m1 = joinPlayer({ id: 3, name: 'M1', auth: 'a-m1' });
+  check('no motd node -> CONFIG.motd used', lastAnnMatching('cfg motd line') !== null);
+  motdLines = ['line A', 'line B'];
+  var seen = {};
+  for (var i = 0; i < 30; i++) { var l = pickMotd(); seen[l] = true; }
+  check('motd node lines picked (random)', seen['line A'] && seen['line B'] && !seen['cfg motd line']);
+  ANN.length = 0;
+  var m2 = joinPlayer({ id: 4, name: 'M2', auth: 'a-m2' });
+  var motdAnn = lastAnnMatching('line ');
+  check('firebase motd announced to joiner only', motdAnn !== null && motdAnn.target === 4);
+  motdLines = [];
+
+  // ══ 3. easter eggs ══
+  eastereggs = new Map([['eggauth', { msg: '☢☢ legend in da house ☢☢', color: '#22CC44', style: 'bold' }]]);
+  ANN.length = 0;
+  var egg = joinPlayer({ id: 5, name: 'Egg', auth: 'eggauth' });
+  var e1 = lastAnnMatching('legend in da house');
+  check('easter egg broadcast to ALL on join', e1 !== null && e1.target == null);
+  check('easter egg color parsed (#hex)', e1 !== null && e1.color === 0x22CC44 && e1.style === 'bold');
+  ANN.length = 0;
+  var noegg = joinPlayer({ id: 6, name: 'NoEgg', auth: 'a-noegg' });
+  check('no egg for other auths', lastAnnMatching('legend in da house') === null);
+  check('parseAnnounceColor variants', parseAnnounceColor('0xFF00FF', 1) === 0xFF00FF && parseAnnounceColor(255, 1) === 255 && parseAnnounceColor('junk', 7) === 7 && parseAnnounceColor(null, 9) === 9);
+
+  // clean the roster before purge scenarios (keep nobody)
+  _players.slice().forEach(function (p) { leavePlayer(p); });
+
+  // ══ 4. AFK spectator purge ══
+  AFK_HANDLER.loadSettings({ enabled: true, timeout: 200, graceTime: 50, hotTimeout: 20, maxPlayers: 4, kickAFKSpectatorWhenFull: true });
+  // A active (kept alive), B plain spectator, C idles out.
+  var A = joinPlayer({ id: 11, name: 'Aa', auth: 'a-A' });
+  var B = joinPlayer({ id: 12, name: 'Bb', auth: 'a-B' });
+  var C = joinPlayer({ id: 13, name: 'Cc', auth: 'a-C' });
+  WLROOM.setPlayerTeam(11, 1);
+  WLROOM.setPlayerTeam(13, 1);
+  // keep every playing player alive except the ones meant to idle out
+  var keepAliveOn = true; var idleIds = { 13: true };
+  (async function () {
+    while (keepAliveOn) {
+      _players.filter(function (p) { return p.team !== 0 && !idleIds[p.id]; })
+              .forEach(function (p) { WLROOM.onPlayerActivity(p); });
+      await sleep(30);
+    }
+  })();
+  await sleep(400); // C: warn at 150ms, evicted at 200ms
+  check('idle player evicted to spectators', WLROOM.getPlayer(13) !== null && WLROOM.getPlayer(13).team === 0);
+
+  // S1: room fills -> the AFK candidate is kicked, by name
+  KICKED.length = 0; ANN.length = 0;
+  var D = joinPlayer({ id: 14, name: 'Dd', auth: 'a-D' }); // 4th -> full
+  check('purge kicks the AFK-evicted spectator when full', KICKED.some(function (k) { return k.id === 13; }));
+  var pk = lastAnnMatching('kicking oldest afk spectator');
+  check('purge announcement carries the real name', pk !== null && pk.msg.indexOf('Cc') >= 0);
+
+  // S2: candidate in the arena queue is protected
+  WLROOM.setPlayerTeam(14, 1); // D plays with A now
+  var C2 = joinPlayer({ id: 15, name: 'Qq', auth: 'a-C2' });
+  idleIds[15] = true;
+  WLROOM.setPlayerTeam(15, 1);
+  await sleep(400); // C2 idles out -> candidate
+  check('second candidate evicted', WLROOM.getPlayer(15) !== null && WLROOM.getPlayer(15).team === 0);
+  window.__ARENA_IN_QUEUE = function (pid) { return pid === 15; };
+  KICKED.length = 0;
+  var F = joinPlayer({ id: 16, name: 'Ff', auth: 'a-F' }); // full again
+  check('queued spectator NOT purge-kicked', !KICKED.some(function (k) { return k.id === 15; }));
+  leavePlayer(F);
+
+  // S3: camera vip is protected
+  window.__ARENA_IN_QUEUE = function () { return false; };
+  vips = new Map([['a-C2', { name: 'Qq', camera: true }]]);
+  KICKED.length = 0;
+  var G = joinPlayer({ id: 17, name: 'Gg', auth: 'a-G' });
+  check('camera vip NOT purge-kicked', !KICKED.some(function (k) { return k.id === 15; }));
+  leavePlayer(G);
+  vips = new Map();
+
+  // S4: chatting clears candidacy (present != AFK)
+  WLROOM.onPlayerChat(WLROOM.getPlayer(15));
+  KICKED.length = 0;
+  var H = joinPlayer({ id: 18, name: 'Hh', auth: 'a-H' });
+  check('chatting candidate NOT purge-kicked', !KICKED.some(function (k) { return k.id === 15; }));
+  check('plain spectator was never kickable', !KICKED.some(function (k) { return k.id === 12; }));
+  leavePlayer(H);
+
+  // S5: maxPlayers guard (0 = never treat the room as full)
+  AFK_HANDLER.loadSettings({ maxPlayers: 0 });
+  var C3 = joinPlayer({ id: 19, name: 'Ii', auth: 'a-I' });
+  idleIds[19] = true;
+  WLROOM.setPlayerTeam(19, 1);
+  await sleep(400);
+  KICKED.length = 0;
+  var J = joinPlayer({ id: 20, name: 'Jj', auth: 'a-J' });
+  check('maxPlayers=0 disables the purge', KICKED.length === 0);
+  keepAliveOn = false;
+  AFK_HANDLER.loadSettings({ enabled: false, timeout: 0, graceTime: 0 });
+
+  // ══ 5. arena plugin: theater + queue predicate + dup kick ══
+  var AP = null;
+  // re-register capture: arena_plugin registered itself into WL_PLUGINS at load
+  for (var i = 0; i < window.WL_PLUGINS._all.length; i++) if (window.WL_PLUGINS._all[i].manifest.id === 'arena') AP = window.WL_PLUGINS._all[i];
+  check('arena plugin registered', AP !== null);
+
+  var _ap = []; var AANN = []; var AKICK = [];
+  var AROOM = {
+    getPlayerList: function () { return _ap; },
+    getPlayer: function (id) { return _ap.find(function (p) { return p.id === id; }) || null; },
+    getPlayerScore: function (id) { var p = AROOM.getPlayer(id); return p ? { score: p.score || 0 } : null; },
+    getSettings: function () { return { teamsLocked: false }; },
+    setSettings: function () {},
+    sendAnnouncement: function (msg, target, color, style, sound) { AANN.push({ msg: String(msg), target: target == null ? null : target, color: color, style: style, sound: sound }); },
+    setPlayerTeam: function (id, team) { var p = AROOM.getPlayer(id); if (p) p.team = team; },
+    kickPlayer: function (id, reason) { AKICK.push({ id: id, reason: reason }); _ap = _ap.filter(function (x) { return x.id !== id; }); },
+    restartGame: function () {},
+  };
+  var HOST = {
+    room: AROOM,
+    config: { pool_from_database: true },
+    auth: new Map(),
+    chainFunction: chainFunction,
+    COMMAND: COMMAND,
+    registry: { add: function () {} },
+    announce: function (msg, player, color, style) { AANN.push({ msg: String(msg), target: player == null ? null : (player.id != null ? player.id : player), color: color, style: style }); },
+    notifyAdmins: function () {},
+    getActivePlayers: function () { return _ap.filter(function (p) { return p.team !== 0; }); },
+  };
+  AP.init(HOST, { maxGames: 3 });
+
+  function ajoin(p) { p.team = p.team || 0; _ap.push(p); if (AROOM.onPlayerJoin) AROOM.onPlayerJoin(p); return p; }
+  var P1 = ajoin({ id: 31, name: 'P1', auth: 'ar-1', team: 0 }); P1.team = 1;
+  var P2 = ajoin({ id: 32, name: 'P2', auth: 'ar-2', team: 0 }); P2.team = 1;
+
+  // dup-auth kick regression
+  AKICK.length = 0;
+  ajoin({ id: 33, name: 'P1clone', auth: 'ar-1' });
+  check('duplicate-auth join kicked', AKICK.some(function (k) { return k.id === 33; }));
+
+  // 3rd joiner auto-queued -> predicate true
+  var P3 = ajoin({ id: 34, name: 'P3', auth: 'ar-3' });
+  check('__ARENA_IN_QUEUE true for queued player', window.__ARENA_IN_QUEUE(34) === true);
+  check('__ARENA_IN_QUEUE false for playing player', window.__ARENA_IN_QUEUE(31) === false);
+
+  // theater: game ends -> next-player callout + map line (queue non-empty: no rematch line)
+  P1.score = 3; P2.score = 1;
+  currentMapName = 'maps/foo.lev';
+  AANN.length = 0;
+  AROOM.onGameStart();
+  AROOM.onGameEnd();
+  AROOM.onGameEnd2();
+  check('next-player callout announced', AANN.some(function (a) { return a.msg.indexOf('is to enter the arena next replacing') >= 0; }));
+  check('map loading line announced', AANN.some(function (a) { return a.msg === 'Loading next map: maps/foo.lev'; }));
+  check('no rematch line when queue occupied', !AANN.some(function (a) { return a.msg.indexOf('rematch') >= 0; }));
+
+  // theater: empty queue + 2 active -> rematch line; sub-pool map label generic
+  // (P3 was swapped in for P2, and P2 went to the BACK of the queue — the
+  // rotation never leaves the queue empty by itself, so P2 must leave.)
+  var act = HOST.getActivePlayers();
+  check('rotation swapped the queue head in', act.length === 2 && act.some(function (p) { return p.id === 34; }));
+  check('ejected player re-queued at the back', window.__ARENA_IN_QUEUE(32) === true);
+  _ap = _ap.filter(function (x) { return x.id !== 32; });
+  AROOM.onPlayerLeave(P2); // leaves the room entirely -> queue empties
+  act.forEach(function (p) { p.score = 0; });
+  act[0].score = 2;
+  currentMapName = 'random#https://pools/x.json';
+  AANN.length = 0;
+  AROOM.onGameStart();
+  AROOM.onGameEnd();
+  AROOM.onGameEnd2();
+  check('rematch line on empty queue', AANN.some(function (a) { return a.msg === 'The queue is empty, time for the rematch!'; }));
+  check('sub-pool map announced generically', AANN.some(function (a) { return a.msg === 'Loading next map: (random pick)'; }));
+
+} catch (err) {
+  RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });
+  document.getElementById('out').textContent += 'CRASH ' + (err && err.stack || err) + '\n';
+}
+  var fails = RESULTS.filter(function (r) { return !r.ok; }).length;
+  document.title = fails === 0 ? 'SOCIAL_OK (' + RESULTS.length + ' checks)' : 'SOCIAL_FAIL(' + fails + '/' + RESULTS.length + ')';
+})();
+</script>
+</body></html>

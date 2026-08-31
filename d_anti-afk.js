@@ -97,6 +97,9 @@ var AFK_HANDLER = (function () {
   }
   
   const activate = (player) => {
+    // any sign of life (chat included) clears purge candidacy — the purge is
+    // for AFK spectators only, and someone talking is not AFK
+    delete kickCandidates[player.id]
     if (!hotPlayers[player.id]) {
       hotPlayers[player.id] = setTimeout(() => {
         delete hotPlayers[player.id]
@@ -107,24 +110,57 @@ var AFK_HANDLER = (function () {
     }
   }
   
+  // Kick the oldest AFK-evicted spectator when the room fills up, to free the
+  // slot. The arena's original was broken in three ways fixed here: maxPlayers
+  // defaulted to 0 so "full" was ALWAYS true, the announce used `%{}` (printed
+  // literally), and a candidate could be kicked while legitimately waiting.
+  // Eligibility is strict — a candidate must be ALL of:
+  //  - previously AFK-evicted (kickCandidates is fed ONLY by evictPlayer;
+  //    a spectator who never idled out in-game is never kickable),
+  //  - still a spectator (back in a team clears candidacy via team change),
+  //  - NOT in the arena waiting queue (waiting for a duel seat isn't AFK),
+  //  - NOT a camera vip (vips node, camera flag — filming is the point of
+  //    sitting still in spec).
+  // A candidate who chats also stops being one (activate below): present ≠ AFK.
+  const isCameraSpectator = (pid) => {
+    try {
+      if (typeof isCameraVip != 'function' || typeof auth == 'undefined') return false;
+      return isCameraVip(auth.get(pid));
+    } catch (e) { return false; }
+  }
+  const inArenaQueue = (pid) => {
+    try {
+      return typeof window.__ARENA_IN_QUEUE == 'function' && window.__ARENA_IN_QUEUE(pid);
+    } catch (e) { return false; }
+  }
   const purgeInactiveSpectators = () => {
-    if (!settings.kickAFKSpectatorWhenFull) {
+    if (!settings.kickAFKSpectatorWhenFull || !settings.maxPlayers) {
       return;
     }
     const list = room.getPlayerList();
-    if (list.length >= settings.maxPlayers) {
-      let oldest = null;
-      for(let playerId in kickCandidates) {
-        if (!oldest) {
-          oldest = playerId
-        } else if (kickCandidates[playerId] < kickCandidates[oldest]) {
-          oldest = playerId
-        }
+    if (list.length < settings.maxPlayers) {
+      return;
+    }
+    let oldest = null;
+    for (let key in kickCandidates) {
+      const pid = parseInt(key);
+      const player = room.getPlayer(pid);
+      if (!player || player.team != settings.spectatorTeam) {
+        delete kickCandidates[key]; // gone, or playing again — stale candidate
+        continue;
       }
-      if (oldest) {
-        room.sendAnnouncement(`Server full, kicking oldest afk spectator %{room.getPlayer(oldest).name}`, null, 0xDDDDDD)
-        room.kickPlayer(oldest, 'Server full, kicking oldest afk spectator')
+      if (inArenaQueue(pid) || isCameraSpectator(pid)) {
+        continue; // protected, but stays a candidate if they idle on later
       }
+      if (!oldest || kickCandidates[key] < kickCandidates[oldest]) {
+        oldest = key;
+      }
+    }
+    if (oldest) {
+      const pid = parseInt(oldest);
+      const name = (room.getPlayer(pid) || {}).name || '?';
+      room.sendAnnouncement(`Server full, kicking oldest afk spectator ${name}`, null, 0xDDDDDD)
+      room.kickPlayer(pid, 'Server full, kicking oldest afk spectator')
     }
   }
   

@@ -9,6 +9,14 @@ var baseRoomName=(typeof CONFIG!=="undefined"&&CONFIG.baseRoomName)||"simple";
 var admins = new Map();
 var poolRef;
 var settingsRef;
+// Social/data-driven nodes (all optional — a room without them behaves as
+// before): motd = list of welcome lines (one picked at random per join),
+// eastereggs = per-auth join announcements, vips = per-auth permissions
+// (camera: exempt from the anti-AFK spectator purge). vips is keyed by auth
+// like admins; none of these grant any admin power.
+var motdLines = [];
+var eastereggs = new Map();
+var vips = new Map();
 
 function initFirebase() {
     async function load_scripts(script_urls) {
@@ -53,8 +61,10 @@ function initFirebase() {
         settingsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/settings`);
 
         listenForAdminsEvents();
-       
+
         listenForSettingsEvents();
+
+        listenForSocialNodes();
 
         if (CONFIG.pool_from_database) {
             console.log("loading pool");
@@ -93,10 +103,12 @@ function loadnewAdmin(childSnapshot) {
 
   // Promote LIVE if the player is currently online — without this, an admin
   // granted from the panel had to REJOIN before the engine flag (and thus the
-  // command registry's admin tier) applied.
+  // command registry's admin tier) applied. A HIDDEN admin is never promoted
+  // automatically (not here, not at join) — they opt in with !admin / !a.
+  // Un-hiding via the panel lands here as child_changed and promotes live.
   try {
     var pid = getPlayerIdFromAuth(k);
-    if (pid != null) { window.WLROOM.setPlayerAdmin(pid, true); }
+    if (pid != null && !v.hidden) { window.WLROOM.setPlayerAdmin(pid, true); }
   } catch (e) { console.log("live admin promote failed: " + e); }
 
   console.log("admin `"+k+"`: `"+v.name+"` has been added to memory");
@@ -108,7 +120,8 @@ function loadAdmin(id, json) {
     admins.set(id, {
         auth: id,
         name: json.name,
-        super: typeof json.super != 'undefined' && json.super
+        super: typeof json.super != 'undefined' && json.super,
+        hidden: typeof json.hidden != 'undefined' && json.hidden
     } );
 }
 
@@ -171,6 +184,49 @@ function addMap(mapname) {
 
 function delMapLast() {        
     poolRef.child(mypoolIdx.length-1).remove()
+}
+
+/** motd lines / easter eggs / vips (whole-node value listeners: these stay
+ * tiny, and a whole-node swap self-heals any partial edit) */
+function listenForSocialNodes() {
+    fdb.ref(`${baseRoomName}/${CONFIG.room_id}/motd`).on('value', function (snap) {
+        var v = snap.val();
+        // accept an array or an RTDB index-keyed object; keep non-empty strings
+        motdLines = Object.values(v || {}).filter(function (l) { return typeof l == 'string' && l != ''; });
+        console.log("motd: " + motdLines.length + " line(s) loaded");
+    });
+    fdb.ref(`${baseRoomName}/${CONFIG.room_id}/eastereggs`).on('value', function (snap) {
+        var v = snap.val() || {};
+        eastereggs = new Map(Object.entries(v));
+        console.log("eastereggs: " + eastereggs.size + " record(s) loaded");
+    });
+    fdb.ref(`${baseRoomName}/${CONFIG.room_id}/vips`).on('value', function (snap) {
+        var v = snap.val() || {};
+        vips = new Map(Object.entries(v));
+        console.log("vips: " + vips.size + " record(s) loaded");
+    });
+}
+
+// One welcome line: random pick from the motd node, CONFIG.motd when the node
+// is absent/empty (zero behavior change for rooms without the node).
+function pickMotd() {
+    if (motdLines.length) return motdLines[Math.floor(Math.random() * motdLines.length)];
+    return (typeof CONFIG != 'undefined' && CONFIG.motd) || null;
+}
+
+// colors in the eastereggs node may be numbers or "0xRRGGBB"/"#RRGGBB" strings
+function parseAnnounceColor(c, fallback) {
+    if (typeof c == 'number' && isFinite(c)) return c;
+    if (typeof c == 'string' && c != '') {
+        var n = parseInt(c.replace('#', '0x'), 16);
+        if (!isNaN(n)) return n;
+    }
+    return fallback;
+}
+
+function isCameraVip(a) {
+    var v = a != null && vips.get(a);
+    return !!(v && v.camera);
 }
 
 /** settings */

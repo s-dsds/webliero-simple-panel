@@ -1,7 +1,10 @@
 initFirebase();
 
 chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
-	if (admins.has(player.auth) ) {
+	// hidden admins keep their record but are NOT auto-promoted — they opt in
+	// with !admin / !a (mappool.js) when they want the flag visible.
+	let adminRec = admins.get(player.auth);
+	if (adminRec && !adminRec.hidden) {
 		window.WLROOM.setPlayerAdmin(player.id, true);
 	}
 	auth.set(player.id, player.auth);
@@ -10,10 +13,18 @@ chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
 	if (player.conn) { conn.set(player.id, player.conn); }
 	writeLogins(player);
 
-	announce(CONFIG.motd, player, 0xFF2222, "bold");
-	
+	let motd = pickMotd();
+	if (motd) { announce(motd, player, 0xFF2222, "bold"); }
+
+	// per-auth easter egg (eastereggs node): broadcast to the whole room,
+	// like the arena's hardcoded ones — but data-driven.
+	let egg = player.auth != null && eastereggs.get(player.auth);
+	if (egg && egg.msg) {
+		announce(egg.msg, null, parseAnnounceColor(egg.color, 0xFFFF00), egg.style || "italic");
+	}
+
 	announce("please join us on discord if you're not there yet! "+CONFIG.discord_invite, player, 0xDD00DD, "italic");
-	if (player.auth){		
+	if (player.auth){
 		auth.set(player.id, player.auth);
 	}
 }

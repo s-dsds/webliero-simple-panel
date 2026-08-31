@@ -236,6 +236,11 @@ var ARENA_PLUGIN = (function () {
     chain(room, 'onGameEnd', function () {
       var out = outQueue.computeScores(flushScores());
       notifyNextPlayer(out);
+      // queue theater (arena parity): an empty queue with a live duel means
+      // the same two go again.
+      if (playerqueue.isEmpty() && host.getActivePlayers().length === 2) {
+        host.announce('The queue is empty, time for the rematch!', null, 0x87CEFA, 'italic');
+      }
     });
 
     // onGameEnd2 — the swap. Runs AFTER the fork's next() in the chain; never
@@ -261,6 +266,15 @@ var ARENA_PLUGIN = (function () {
         }
       }
       outQueue.resetOut(); // consumed — never eject twice off one result
+      // queue theater (arena parity): announce the incoming map. We chain
+      // AFTER the fork's onGameEnd2 (command_log.js assigns it before plugin
+      // init), so next() has already advanced currentMapName synchronously —
+      // the actual load is async but the NAME is settled. Sub-pool entries
+      // ("random#<url>") resolve their real name later; announce generically.
+      if (host.config.pool_from_database && typeof currentMapName == 'string' && currentMapName) {
+        var mapLabel = currentMapName.indexOf('random#') === 0 ? '(random pick)' : currentMapName;
+        host.announce('Loading next map: ' + mapLabel, null, 0x89F336);
+      }
     });
 
     // onPlayerJoin — SAFEGUARD (duplicate-auth kick): two sessions on one auth
@@ -364,6 +378,12 @@ var ARENA_PLUGIN = (function () {
     // fork's d_anti-afk now exposes.
     window.__AFK_EVICT_HOOKS = window.__AFK_EVICT_HOOKS || [];
     window.__AFK_EVICT_HOOKS.push(function () { moveToGameIfSomeoneIsWaiting(true); });
+
+    // Queue-membership predicate for d_anti-afk's spectator purge: a spectator
+    // WAITING for a duel seat is not AFK and must never be purge-kicked.
+    window.__ARENA_IN_QUEUE = function (pid) {
+      return playerqueue != null && playerqueue.q.some(function (e) { return e.id === pid; });
+    };
 
     setLock(isFull()); // establish lock state at boot
     emitQueue();       // initial snapshot for the live-queue widget

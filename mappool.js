@@ -467,7 +467,7 @@ COMMAND_REGISTRY.add("clearcache", ["!clearcache: clears local map cache"], (pla
     return false;
 }, COMMAND.ADMIN_ONLY);
 
-COMMAND_REGISTRY.add("admin", ["!admin: if you're entitled to it, you get admin"], (player) => {
+COMMAND_REGISTRY.add(["admin","a"], ["!admin or !a: if you're entitled to it, you get admin (the way in for hidden admins)"], (player) => {
     let a = auth.get(player.id);
     if (admins.has(a) ) {
 		window.WLROOM.setPlayerAdmin(player.id, true);
@@ -528,7 +528,7 @@ COMMAND_REGISTRY.add(["addadmin","aa"], ["!addadmin #id: adds an admin"], (playe
 
 COMMAND_REGISTRY.add(["listadmins","la"], ["!listadmins: list all admins"], (player)=> {
     for (const a of admins.values()) {
-        announce(`${a.name} ${a.auth} ${a.super?'(super admin)':''}`, player.id, COLORS.ANNOUNCE_BRIGHT)
+        announce(`${a.name} ${a.auth} ${a.super?'(super admin)':''}${a.hidden?'(hidden)':''}`, player.id, COLORS.ANNOUNCE_BRIGHT)
     }
     return false;
 },  COMMAND.SUPER_ADMIN_ONLY);
