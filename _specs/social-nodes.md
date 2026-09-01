@@ -41,10 +41,20 @@ Per-auth permissions that are NOT admin. Keyed by auth. One flag so far:
 
 `admins/<auth>.hidden = true` keeps the record but skips BOTH auto-promotions
 (join-time in `zz_1v1.js` and the panel live-promote in `loadnewAdmin`). A
-hidden admin opts in by typing `!admin` or `!a`. Un-hiding via the panel
-promotes live (child_changed). The panel admins tab has the checkbox
-(ext-proxy `handlePutAdmins` round-trips the flag — older panels would strip
-it on save).
+hidden admin opts in by typing `!admin` or `!a` (private "you are admin now";
+silent for the unentitled — no list probing). Semantics, post-review:
+
+- Hidden hides the POWERS, not just the badge: `isSuperAdmin` also requires
+  the engine admin flag, so a hidden super-admin has no super-tier commands
+  until they type `!a`.
+- Ticking hidden in the panel DEMOTES a live admin (symmetric with removal);
+  un-hiding re-promotes live. Any record touch re-demotes an opted-in hidden
+  admin — they type `!a` again.
+- In-room `!addadmin` uses `update` (a whole-child `set` used to strip
+  super/hidden and auto-promote the hidden target via child_changed).
+
+The panel admins tab has the checkbox (ext-proxy `handlePutAdmins`
+round-trips the flag — older panels would strip it on save).
 
 ## AFK spectator purge (d_anti-afk.js) — fixed semantics
 
@@ -58,6 +68,17 @@ be all of:
   arena_plugin),
 - not a camera vip,
 - silent (any chat/activity clears candidacy — present ≠ AFK).
+
+The purge is inert while the plugin is disabled (`!afk 0` / no `afkLimit` in
+settings), and `disable()` drains standing candidates so a re-enable starts
+fresh.
+
+Ops note (hot-reload): `motdLines`/`eastereggs`/`vips` live in firebase.js
+globals and their listeners attach in `initFirebase()`. Re-evaluating
+firebase.js ALONE empties them (the camera exemption then fails closed =
+kickable) until the next full boot; hot-reload the room or re-run
+`initFirebase` semantics apply — restart deploys are the supported path
+anyway (see leaver/AFK spec).
 
 Tests: `test-harness-social.html` (32 checks — hidden admins, motd, eggs,
 purge exemptions, queue theater, dup-auth kick). Run:

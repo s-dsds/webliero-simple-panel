@@ -272,7 +272,13 @@ var ARENA_PLUGIN = (function () {
       // the actual load is async but the NAME is settled. Sub-pool entries
       // ("random#<url>") resolve their real name later; announce generically.
       if (host.config.pool_from_database && typeof currentMapName == 'string' && currentMapName) {
-        var mapLabel = currentMapName.indexOf('random#') === 0 ? '(random pick)' : currentMapName;
+        // A cached sub-pool resolves synchronously, so by the time we read it
+        // currentMapName may already be the FULL resolved URL (only the first
+        // rotation into a sub-pool still shows the random# entry) — trim URLs
+        // to their file name so the announce stays readable either way.
+        var mapLabel = currentMapName;
+        if (mapLabel.indexOf('random#') === 0) mapLabel = '(random pick)';
+        else if (mapLabel.indexOf('https://') === 0) mapLabel = mapLabel.slice(mapLabel.lastIndexOf('/') + 1) || mapLabel;
         host.announce('Loading next map: ' + mapLabel, null, 0x89F336);
       }
     });

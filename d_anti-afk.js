@@ -134,7 +134,10 @@ var AFK_HANDLER = (function () {
     } catch (e) { return false; }
   }
   const purgeInactiveSpectators = () => {
-    if (!settings.kickAFKSpectatorWhenFull || !settings.maxPlayers) {
+    // settings.enabled too: after !afk 0 (or the settings node dropping
+    // afkLimit) nobody may be kicked "due to inactivity" by a subsystem
+    // that is off — disable() also drains the candidate list below.
+    if (!settings.enabled || !settings.kickAFKSpectatorWhenFull || !settings.maxPlayers) {
       return;
     }
     const list = room.getPlayerList();
@@ -189,13 +192,15 @@ var AFK_HANDLER = (function () {
         }        
      }
   }
-  const disable = () => {    
-    loadSettings({    
-        timeout: 0,    
-        graceTime: 0,        
+  const disable = () => {
+    loadSettings({
+        timeout: 0,
+        graceTime: 0,
         enabled: false,
     });
-    if (typeof announce =='function') announce(`afk detection was disabled`)   
+    // stale candidacy must not survive a disable: re-enabling later starts fresh
+    for (const k in kickCandidates) { delete kickCandidates[k] }
+    if (typeof announce =='function') announce(`afk detection was disabled`)
   }
   const setTimeoutSeconds = (n) => {
     if (n==0) {

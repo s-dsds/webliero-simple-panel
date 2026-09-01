@@ -10,6 +10,10 @@ var CONFIG = { room_id: 'test', max_players: 99, pool_from_database: true,
                motd: 'cfg motd line', discord_invite: 'https://discord.gg/x' };
 var auth = new Map();
 var conn = new Map();
+function getPlayerIdFromAuth(a) { // _init.js (not loaded here)
+  for (const [k, p] of auth) { if (p == a) return k; }
+  return null;
+}
 function chainFunction(object, attribute, func) {
   var original = object[attribute];
   if (original) {
@@ -109,9 +113,18 @@ try {
 
   // !a self-promote (mappool registration)
   check('!admin and !a both registered', REGISTRY.has('admin') && REGISTRY.has('a') && REGISTRY.get('a').perm === COMMAND.FOR_ALL);
+  check('hidden SUPER admin has no super powers before !a', isSuperAdmin(hid) === false);
   PROMOTED.length = 0;
   REGISTRY.get('a').f(hid);
   check('hidden admin promoted via !a', PROMOTED.some(function (x) { return x.id === 2 && x.flag === true; }));
+  check('super powers only after !a promote', isSuperAdmin(hid) === true);
+
+  // ticking hidden in the panel demotes LIVE (child_changed -> loadnewAdmin)
+  PROMOTED.length = 0;
+  loadnewAdmin({ key: 'visauth', val: function () { return { name: 'vis', hidden: true }; } });
+  check('hidden toggle demotes a live admin', PROMOTED.some(function (x) { return x.id === 1 && x.flag === false; }) && admins.get('visauth').hidden === true);
+  loadnewAdmin({ key: 'visauth', val: function () { return { name: 'vis' }; } }); // un-hide -> re-promote
+  check('un-hide re-promotes live', PROMOTED.some(function (x) { return x.id === 1 && x.flag === true; }));
 
   // ══ 2. motd node ══
   ANN.length = 0;
@@ -209,7 +222,29 @@ try {
   var J = joinPlayer({ id: 20, name: 'Jj', auth: 'a-J' });
   check('maxPlayers=0 disables the purge', KICKED.length === 0);
   keepAliveOn = false;
+
+  // S6: enabled:false blocks the purge even with a standing candidate…
+  AFK_HANDLER.loadSettings({ maxPlayers: 4, enabled: false });
+  KICKED.length = 0;
+  var K = joinPlayer({ id: 21, name: 'Kk', auth: 'a-K' });
+  check('disabled AFK plugin never purge-kicks', !KICKED.some(function (k) { return k.id === 19; }));
+  leavePlayer(K);
+  // …and disable() drains candidacy, so re-enabling starts fresh
+  AFK_HANDLER.disable();
+  AFK_HANDLER.loadSettings({ enabled: true, timeout: 200, graceTime: 50, maxPlayers: 4 });
+  KICKED.length = 0;
+  var L = joinPlayer({ id: 22, name: 'Ll', auth: 'a-L' });
+  check('disable() drained old candidates', !KICKED.some(function (k) { return k.id === 19; }));
+  leavePlayer(L);
   AFK_HANDLER.loadSettings({ enabled: false, timeout: 0, graceTime: 0 });
+
+  // S7: easter egg suppressed for a duplicate-auth session
+  eastereggs = new Map([['dupauth', { msg: 'DUP EGG LINE', color: 0xFF00FF }]]);
+  ANN.length = 0;
+  var X1 = joinPlayer({ id: 41, name: 'X1', auth: 'dupauth' });
+  var X2 = joinPlayer({ id: 42, name: 'X2', auth: 'dupauth' });
+  check('egg fires once, suppressed for the dupe session', ANN.filter(function (a) { return a.msg === 'DUP EGG LINE'; }).length === 1);
+  eastereggs = new Map();
 
   // ══ 5. arena plugin: theater + queue predicate + dup kick ══
   var AP = null;
@@ -284,6 +319,16 @@ try {
   AROOM.onGameEnd2();
   check('rematch line on empty queue', AANN.some(function (a) { return a.msg === 'The queue is empty, time for the rematch!'; }));
   check('sub-pool map announced generically', AANN.some(function (a) { return a.msg === 'Loading next map: (random pick)'; }));
+
+  // resolved sub-pool URL (second rotation into a cached pool) trims to filename
+  HOST.getActivePlayers().forEach(function (p) { p.score = 0; });
+  HOST.getActivePlayers()[0].score = 1;
+  currentMapName = 'https://webliero.gitlab.io/webliero-maps/pool/xy.png';
+  AANN.length = 0;
+  AROOM.onGameStart();
+  AROOM.onGameEnd();
+  AROOM.onGameEnd2();
+  check('URL map name trimmed to filename', AANN.some(function (a) { return a.msg === 'Loading next map: xy.png'; }));
 
 } catch (err) {
   RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });

@@ -104,11 +104,14 @@ function loadnewAdmin(childSnapshot) {
   // Promote LIVE if the player is currently online — without this, an admin
   // granted from the panel had to REJOIN before the engine flag (and thus the
   // command registry's admin tier) applied. A HIDDEN admin is never promoted
-  // automatically (not here, not at join) — they opt in with !admin / !a.
-  // Un-hiding via the panel lands here as child_changed and promotes live.
+  // automatically (not here, not at join) — they opt in with !admin / !a —
+  // and ticking hidden in the panel DEMOTES live (symmetric with
+  // child_removed; the panel promises "promotions/demotions apply live").
+  // Side effect accepted: any record touch re-demotes a hidden admin who had
+  // opted in — they just type !a again.
   try {
     var pid = getPlayerIdFromAuth(k);
-    if (pid != null && !v.hidden) { window.WLROOM.setPlayerAdmin(pid, true); }
+    if (pid != null) { window.WLROOM.setPlayerAdmin(pid, !v.hidden); }
   } catch (e) { console.log("live admin promote failed: " + e); }
 
   console.log("admin `"+k+"`: `"+v.name+"` has been added to memory");
@@ -128,12 +131,18 @@ function loadAdmin(id, json) {
 function isSuperAdmin(player) {
     let a = auth.get(player.id)
     let p = admins.get(a)
-    return p && p.super
+    // The engine admin flag is part of the gate: a HIDDEN super-admin has no
+    // powers until they opt in with !a (otherwise the super tier would leak
+    // around the hidden gate, which only the ADMIN tier checked via p.admin).
+    return !!(player && player.admin && p && p.super)
 }
 
 function addAdmin(player) {
     let a = auth.get(player.id)
-    adminsRef.child(a).set({name: player.name})
+    // update, not set: a whole-child set here stripped super/hidden when
+    // !addadmin re-added an existing admin (and the resulting child_changed
+    // then auto-promoted a hidden one).
+    adminsRef.child(a).update({name: player.name})
 }
 
 function removeAdmin(a) {    
@@ -191,7 +200,10 @@ function delMapLast() {
 function listenForSocialNodes() {
     fdb.ref(`${baseRoomName}/${CONFIG.room_id}/motd`).on('value', function (snap) {
         var v = snap.val();
-        // accept an array or an RTDB index-keyed object; keep non-empty strings
+        // accept an array, an RTDB index-keyed object, or a bare string (a
+        // hand-edited node — Object.values on a string would split it into
+        // characters); keep non-empty strings
+        if (typeof v == 'string') v = v ? [v] : [];
         motdLines = Object.values(v || {}).filter(function (l) { return typeof l == 'string' && l != ''; });
         console.log("motd: " + motdLines.length + " line(s) loaded");
     });

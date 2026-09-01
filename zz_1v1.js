@@ -17,9 +17,12 @@ chainFunction(window.WLROOM, 'onPlayerJoin', (player) => {
 	if (motd) { announce(motd, player, 0xFF2222, "bold"); }
 
 	// per-auth easter egg (eastereggs node): broadcast to the whole room,
-	// like the arena's hardcoded ones — but data-driven.
+	// like the arena's hardcoded ones — but data-driven. Skip when another
+	// LIVE session already holds this auth: the arena plugin will kick this
+	// duplicate right after us, and a reconnect loop must not spam the room.
 	let egg = player.auth != null && eastereggs.get(player.auth);
-	if (egg && egg.msg) {
+	let dupe = player.auth != null && window.WLROOM.getPlayerList().some((p) => p.id != player.id && auth.get(p.id) == player.auth);
+	if (egg && egg.msg && !dupe) {
 		announce(egg.msg, null, parseAnnounceColor(egg.color, 0xFFFF00), egg.style || "italic");
 	}
 
