@@ -209,7 +209,13 @@ var ARENA_PLUGIN = (function () {
   }
 
   function moveToGameIfSomeoneIsWaiting(force) {
-    if ((force || (!isFull() && hasActive())) && !playerqueue.isEmpty()) {
+    // NEVER exceed 2, force or not. `force` only bypasses the hasActive()
+    // requirement (fill an EMPTY field from the queue) — it must NOT bypass
+    // the fullness cap. The old `force || …` pushed a queued player onto an
+    // already-full field: a second, lock-independent multi-push source (the
+    // AFK-evict hook and !q both pass force=true, and could fire while the
+    // field was already 2).
+    if (!isFull() && (force || hasActive()) && !playerqueue.isEmpty()) {
       var pe = playerqueue.shift();
       console.log('arena: moving ' + pe.name + ' to the game');
       moveToGame(pe);

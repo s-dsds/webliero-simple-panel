@@ -363,6 +363,14 @@ try {
   AROOM.onPlayerTeamChange(HOST.getActivePlayers()[0], null);
   check('locked while a player is waiting', AROOM._settings.teamsLocked === true && window.__ARENA_IN_QUEUE(99));
 
+  // ══ 8. root fix: force-push must NOT exceed 2 (the AFK-evict / !q over-push) ══
+  // field is full (2) and id 99 is queued; the AFK-evict hook fires force=true.
+  check('field full before force-push', HOST.getActivePlayers().length === 2 && window.__ARENA_IN_QUEUE(99));
+  var beforeQ = window.__ARENA_IN_QUEUE(99);
+  window.__AFK_EVICT_HOOKS.forEach(function (h) { h(); }); // force=true path
+  check('force-push refused while full (still 2)', HOST.getActivePlayers().length === 2);
+  check('queued player NOT pulled onto a full field', window.__ARENA_IN_QUEUE(99) === beforeQ);
+
 } catch (err) {
   RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });
   document.getElementById('out').textContent += 'CRASH ' + (err && err.stack || err) + '\n';
