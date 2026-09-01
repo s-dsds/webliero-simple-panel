@@ -17,6 +17,7 @@ var STATS_REENTRY_QUIET_MS = 5000;
 var STATS_KNOWN_MODES = { dm: 1, tdm: 1, htf: 1, dtf: 1, ctf: 1, ctf2: 1, haz: 1, pred: 1, lms: 1 };
 
 var statsRootRef;
+var statsLiveRef;
 var statsSV;            // firebase.database.ServerValue
 var statsHasIncrement;  // confirmed at init (Risk 3 smoke)
 var statsGameInProgress = false;
@@ -88,7 +89,17 @@ var statsLiveTimer = (typeof statsLiveTimer !== 'undefined') ? statsLiveTimer : 
 
 function initStats() {
     if (typeof fdb == 'undefined' || !fdb) { setTimeout(initStats, 200); return; }
-    statsRootRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/stats`);
+    // Multi-region (game-history.md §4): regional siblings share ONE stats
+    // root via CONFIG.stats_room_id (default room_id — fully backward
+    // compatible). Safe to share: counters are ServerValue.increment,
+    // ELO/streak/form absolutes are per-auth and one player can't play two
+    // regions at once. ext-proxy readers resolve the same mapping through the
+    // room doc's statsRoomId field — set BOTH or the shared side is invisible.
+    statsRootRef = fdb.ref(`${baseRoomName}/${CONFIG.stats_room_id || CONFIG.room_id}/stats`);
+    // stats/live is ROOM-GLOBAL (the in-progress game snapshot) — two regions
+    // sharing it would flap between games, and statspage.go deliberately reads
+    // it under the room's OWN id. It always stays on this room's path.
+    statsLiveRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/stats/live`);
 
     statsSV = firebase.database.ServerValue;
     statsHasIncrement = !!(statsSV && typeof statsSV.increment === 'function');
@@ -173,13 +184,13 @@ function statsWriteLive() {
         if (!players.length) {
             if (statsLiveWasRunning) {
                 statsLiveWasRunning = false;
-                statsRootRef.child('live').set({ inProgress: false, ts: Date.now() });
+                statsLiveRef.set({ inProgress: false, ts: Date.now() });
             }
             return;
         }
         statsLiveWasRunning = true;
         players.sort(function (a, b) { return b.score - a.score; });
-        statsRootRef.child('live').set({
+        statsLiveRef.set({
             inProgress: true, ts: Date.now(),
             level: statsCurrentLevelName() || null,
             players: players,
