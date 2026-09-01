@@ -98,6 +98,12 @@ function lastAnnMatching(sub) { for (var i = ANN.length - 1; i >= 0; i--) if (AN
 
 (async function () {
 try {
+  // ══ 0. primary/local path helpers (multi-region single tree) ══
+  check('paths default to room_id', primaryPath('settings') === 'simple/test/settings' && localPath('meta') === 'simple/test/meta');
+  CONFIG.primary_room_id = 'prim';
+  check('primary_room_id redirects shared paths only', primaryPath('settings') === 'simple/prim/settings' && primaryPath('leagues') === 'simple/prim/leagues' && localPath('poolctl') === 'simple/test/poolctl');
+  delete CONFIG.primary_room_id;
+
   // ══ 1. hidden admins ══
   loadAdmin('visauth', { name: 'vis' });
   loadAdmin('hidauth', { name: 'hid', hidden: true, super: true });

@@ -25,8 +25,12 @@ function initModeration() {
         setTimeout(initModeration, 200);
         return;
     }
-    moderationRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/moderation`);
-    bansRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/bans`);
+    // Shared across regional siblings (primary tree): one moderation event
+    // log, so a ban lands in every region at once. Both rooms rebuild the
+    // same derived `bans` summary from the same log — the whole-node sync
+    // converges.
+    moderationRef = fdb.ref(primaryPath('moderation'));
+    bansRef = fdb.ref(primaryPath('bans'));
     // Replay history, then stay subscribed: child_added fires in key order
     // (epoch-ms keys), first for every existing record, then for each new one
     // (panel writes included). Records older than boot only rebuild state;

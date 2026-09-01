@@ -1,7 +1,7 @@
 <!DOCTYPE html><html><head><meta charset=utf-8></head><body><pre id="out"></pre>
 <script>
 // ---- stubs the fork globals z_stats.js depends on ----
-var CONFIG = { room_id: 'test', stats_elo_k: 32 };
+var CONFIG = { room_id: 'test', stats_elo_k: 32, region: 'EU!x' }; // region sanitizes to 'eux'
 var baseRoomName = 'simple';
 var auth = new Map();
 function chainFunction(obj, attr, fn) {
@@ -77,6 +77,11 @@ function inc(v){ return v && typeof v==='object' && '__inc' in v ? v.__inc : v; 
   var dsum=(eA-1500)+(eB-1500)+(eC-1500)+(eD-1500);
   assert('T1 ELO deltas ~sum to 0 (±rounding)', Math.abs(dsum)<=4);
   assert('T1 daily games+1', inc(u['daily/'+new Date().toISOString().slice(0,10).replace(/-/g,'')+'/games'])===1);
+  // region dimension (multi-region shared tree): per-region splits, sanitized key
+  assert('T1 region kills split', inc(u['players/aA/regions/eux/kills'])===10);
+  assert('T1 region games+wins split', inc(u['players/aA/regions/eux/games'])===1 && inc(u['players/aA/regions/eux/wins'])===1);
+  assert('T1 region no win for loser', u['players/aD/regions/eux/wins']===undefined && inc(u['players/aD/regions/eux/games'])===1);
+  assert('T1 global fields unchanged by region', inc(u['players/aA/kills'])===10 && typeof u['players/aA/elo']==='number');
   assert('T1 level count+1', Object.keys(u).some(k=>/^levels\/arena_png\/count$/.test(k)));
 
   // ===== Test 2: tie for first → no win, shared rank =====

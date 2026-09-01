@@ -6,6 +6,18 @@ var loginsRef;
 var playersRef;
 var adminsRef;
 var baseRoomName=(typeof CONFIG!=="undefined"&&CONFIG.baseRoomName)||"simple";
+// Multi-region single tree: CONFIG.primary_room_id makes every SHARED node
+// (config, ladder, leagues, moderation, social) live under the PRIMARY room's
+// subtree, while per-instance runtime nodes (meta/roomlink, poolstate,
+// poolctl, stats/live, plugins, leaguestate, logins, comments) stay under
+// this room's own id. Default unset = both resolve to room_id, zero change.
+// ext-proxy mirrors the mapping via the room doc's configRoomId/statsRoomId.
+function primaryPath(node) {
+    return baseRoomName + "/" + ((typeof CONFIG !== "undefined" && CONFIG.primary_room_id) || CONFIG.room_id) + "/" + node;
+}
+function localPath(node) {
+    return baseRoomName + "/" + CONFIG.room_id + "/" + node;
+}
 var admins = new Map();
 var poolRef;
 var settingsRef;
@@ -56,9 +68,9 @@ function initFirebase() {
         loginsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/logins`);
         playersRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/players`);
 
-        adminsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/admins`);
-        
-        settingsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/settings`);
+        adminsRef = fdb.ref(primaryPath('admins'));
+
+        settingsRef = fdb.ref(primaryPath('settings'));
 
         listenForAdminsEvents();
 
@@ -68,7 +80,7 @@ function initFirebase() {
 
         if (CONFIG.pool_from_database) {
             console.log("loading pool");
-            poolRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/pool`);
+            poolRef = fdb.ref(primaryPath('pool'));
             listenForPoolEvents();
         }
 		console.log('firebase ok');
@@ -198,7 +210,7 @@ function delMapLast() {
 /** motd lines / easter eggs / vips (whole-node value listeners: these stay
  * tiny, and a whole-node swap self-heals any partial edit) */
 function listenForSocialNodes() {
-    fdb.ref(`${baseRoomName}/${CONFIG.room_id}/motd`).on('value', function (snap) {
+    fdb.ref(primaryPath('motd')).on('value', function (snap) {
         var v = snap.val();
         // accept an array, an RTDB index-keyed object, or a bare string (a
         // hand-edited node — Object.values on a string would split it into
@@ -207,12 +219,12 @@ function listenForSocialNodes() {
         motdLines = Object.values(v || {}).filter(function (l) { return typeof l == 'string' && l != ''; });
         console.log("motd: " + motdLines.length + " line(s) loaded");
     });
-    fdb.ref(`${baseRoomName}/${CONFIG.room_id}/eastereggs`).on('value', function (snap) {
+    fdb.ref(primaryPath('eastereggs')).on('value', function (snap) {
         var v = snap.val() || {};
         eastereggs = new Map(Object.entries(v));
         console.log("eastereggs: " + eastereggs.size + " record(s) loaded");
     });
-    fdb.ref(`${baseRoomName}/${CONFIG.room_id}/vips`).on('value', function (snap) {
+    fdb.ref(primaryPath('vips')).on('value', function (snap) {
         var v = snap.val() || {};
         vips = new Map(Object.entries(v));
         console.log("vips: " + vips.size + " record(s) loaded");
@@ -273,7 +285,7 @@ COMMAND_REGISTRY.add("reset", ["!reset: resets to last settings loaded from data
 
 
 COMMAND_REGISTRY.add("poolreload", ["!poolreload: reloads the map pool from database from database"], (player) => {
-    poolRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/pool`);    
+    poolRef = fdb.ref(primaryPath('pool'));
     mypool = {};
     mypoolIdx = [];
     listenForPoolEvents();

@@ -18,6 +18,7 @@ var STATS_KNOWN_MODES = { dm: 1, tdm: 1, htf: 1, dtf: 1, ctf: 1, ctf2: 1, haz: 1
 
 var statsRootRef;
 var statsLiveRef;
+var statsRegion = '';
 var statsSV;            // firebase.database.ServerValue
 var statsHasIncrement;  // confirmed at init (Risk 3 smoke)
 var statsGameInProgress = false;
@@ -95,7 +96,15 @@ function initStats() {
     // ELO/streak/form absolutes are per-auth and one player can't play two
     // regions at once. ext-proxy readers resolve the same mapping through the
     // room doc's statsRoomId field — set BOTH or the shared side is invisible.
-    statsRootRef = fdb.ref(`${baseRoomName}/${CONFIG.stats_room_id || CONFIG.room_id}/stats`);
+    // primary_room_id (single shared tree) implies the shared ladder;
+    // stats_room_id stays as the finer-grained override on top of it.
+    statsRootRef = fdb.ref(`${baseRoomName}/${CONFIG.stats_room_id || CONFIG.primary_room_id || CONFIG.room_id}/stats`);
+    // Region dimension: per-region W/L/K/D splits inside the SHARED tree
+    // (increments only — race-free like every other shared counter). Lets the
+    // stats page answer "does X fare better in EU or NA" while the ladder
+    // (ELO/rank) stays global. Key is sanitized to an RTDB-safe slug.
+    statsRegion = String((typeof CONFIG !== 'undefined' && CONFIG.region) || '')
+        .toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 16);
     // stats/live is ROOM-GLOBAL (the in-progress game snapshot) — two regions
     // sharing it would flap between games, and statspage.go deliberately reads
     // it under the room's OWN id. It always stays on this room's path.
@@ -839,6 +848,13 @@ function statsOnGameEnd() {
         if (!p.exists) updates[`${base}/firstSeen`] = now;
         gameKills += p.dKills;
 
+        // per-region splits (shared-tree multi-region): counters only, the
+        // global fields above stay the single ladder
+        if (statsRegion) {
+            updates[`${base}/regions/${statsRegion}/kills`] = statsInc(p.dKills);
+            updates[`${base}/regions/${statsRegion}/deaths`] = statsInc(p.dDeaths);
+        }
+
         var formEntry = { ts: now, kills: p.dKills, deaths: p.dDeaths, suicides: (statsSuicides.get(p.auth) || 0) };
         if (p.midSession || N < 2) {
             updates[`${base}/partialGames`] = statsInc(1);
@@ -848,6 +864,10 @@ function statsOnGameEnd() {
             var norm = N > 1 ? (N - p.rank) / (N - 1) : 1;
             updates[`${base}/placeSumNorm`] = statsInc(norm);
             if (p.rank === 1) updates[`${base}/wins`] = statsInc(1);
+            if (statsRegion) {
+                updates[`${base}/regions/${statsRegion}/games`] = statsInc(1);
+                if (p.rank === 1) updates[`${base}/regions/${statsRegion}/wins`] = statsInc(1);
+            }
             // §5 trap: skip the elo ABSOLUTE write until the seed read lands —
             // counters above are increments and unaffected.
             if (p.seeded) { updates[`${base}/elo`] = p.newElo; }

@@ -171,10 +171,11 @@ function initLeagues() {
         setTimeout(initLeagues, 200);
         return;
     }
-    var basePath = baseRoomName + "/" + CONFIG.room_id;
-    leaguesRef = fdb.ref(basePath + "/leagues");
-    leaguePtrRef = fdb.ref(basePath + "/league");
-    leagueStateRef = fdb.ref(basePath + "/leaguestate");
+    // catalog + pointer + settings cache follow the primary tree (regional
+    // siblings run the SAME league); leaguestate is this room's own mirror.
+    leaguesRef = fdb.ref(primaryPath("leagues"));
+    leaguePtrRef = fdb.ref(primaryPath("league"));
+    leagueStateRef = fdb.ref(localPath("leaguestate"));
 
     // The capability flag (meta.leagues) is written by panel.js's
     // writePanelMeta alongside meta.weapons/meta.stats — it SETs the whole
@@ -182,7 +183,7 @@ function initLeagues() {
 
     // cache-only settings listener: never applies, only lets the overlay know
     // the node's actual keys (getSettings() can't reconstruct them)
-    fdb.ref(basePath + "/settings").on("value", function (snap) {
+    fdb.ref(primaryPath("settings")).on("value", function (snap) {
         leagueNodeCache = snap.val() || {};
     });
 
@@ -252,7 +253,8 @@ function handleLeaguePointer(v) {
 function leagueWritePointer(id, applyAt, player) {
     var setBy = "room:" + ((typeof auth !== "undefined" && auth.get(player.id)) || player.name || "?");
     leaguePtrRef.set({ id: id, applyAt: applyAt, setAt: Date.now(), setBy: setBy });
-    fdb.ref(baseRoomName + "/" + CONFIG.room_id + "/_meta/versions/league").set(Date.now());
+    // version bump goes where the governed node lives (the primary tree)
+    fdb.ref(primaryPath("_meta/versions/league")).set(Date.now());
 }
 
 // ── commands ────────────────────────────────────────────────────────────────

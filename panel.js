@@ -15,10 +15,13 @@ function initPanel() {
         setTimeout(initPanel, 200);
         return;
     }
-    panelModRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/mod`);
-    panelWeaponsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/weapons`);
-    panelWeaponlistRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/weaponlist`);
-    panelMetaRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/meta`);
+    // mod/weapons are config (primary tree); weaponlist is room-written
+    // (derived from the loaded mod) and meta carries THIS room's join link —
+    // both stay local.
+    panelModRef = fdb.ref(primaryPath('mod'));
+    panelWeaponsRef = fdb.ref(primaryPath('weapons'));
+    panelWeaponlistRef = fdb.ref(localPath('weaponlist'));
+    panelMetaRef = fdb.ref(localPath('meta'));
 
     panelModRef.on('value', handlePanelModChange);
     panelWeaponsRef.on('value', handlePanelWeaponsChange);

@@ -347,14 +347,17 @@ function initPoolPanel() {
         setTimeout(initPoolPanel, 200);
         return;
     }
-    poolStateRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolstate`);
-    poolCtlRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolctl`);
-    poolModeRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolmode`);
+    // poolstate (runtime cursor) + poolctl (one-shot command channel) are
+    // strictly per-room — a shared ctl channel gets consumed by whichever
+    // sibling grabs it first. poolmode/poolbounds are config → primary tree.
+    poolStateRef = fdb.ref(localPath('poolstate'));
+    poolCtlRef = fdb.ref(localPath('poolctl'));
+    poolModeRef = fdb.ref(primaryPath('poolmode'));
     poolModeRef.once('value').then((s) => {
         var m = s.val();
         if (m === 'ordered' || m === 'shuffle') { poolMode = m; rebuildPoolIdx(true); }
     });
-    poolBoundsRef = fdb.ref(`${baseRoomName}/${CONFIG.room_id}/poolbounds`);
+    poolBoundsRef = fdb.ref(primaryPath('poolbounds'));
     poolBoundsRef.on('value', (s) => { poolBounds = s.val() || {}; });
     poolCtlRef.on('value', (snap) => {
         const c = snap.val();
