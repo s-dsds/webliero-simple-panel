@@ -321,6 +321,19 @@ var ARENA_PLUGIN = (function () {
     chain(room, 'onPlayerTeamChange', function (p, bp) {
       setLock(isFull());
       if (p.team !== 0) playerqueue.remove(p);
+      // HARD INVARIANT: never more than 2 on the field. teamsLocked SHOULD stop
+      // a 3rd from joining, but it has been observed to leak here (mass
+      // simultaneous joins / admin push), and once 3+ are active the 2-player
+      // safeguards freeze the swap and it never self-corrects. So bounce the
+      // intruder — the player who just moved INTO a team and tipped us over 2 —
+      // straight back to spectator + the queue. Never fires in a clean 1v1.
+      if (p.team !== 0 && host.getActivePlayers().length > 2) {
+        playerqueue.add(p);   // queue them (emits its own snapshot)
+        moveToSpec(p);        // → recurses here with p.team===0: no-op guard, relock
+        host.announce('a duel is already running — you were queued (type !q to just spectate)', p, 0xDD2222, 'bold');
+        console.log('arena: bounced ' + p.name + ' — more than 2 on the field');
+        return; // nothing legitimate changed; do NOT restart the running duel
+      }
       emitQueue(); // seat changed — the "playing" side of the snapshot moved
       if (bp !== null && bp !== undefined && isFull()) {
         console.log('arena: restarting game to get correct start score');

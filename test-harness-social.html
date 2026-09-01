@@ -266,7 +266,7 @@ try {
     getSettings: function () { return { teamsLocked: false }; },
     setSettings: function () {},
     sendAnnouncement: function (msg, target, color, style, sound) { AANN.push({ msg: String(msg), target: target == null ? null : target, color: color, style: style, sound: sound }); },
-    setPlayerTeam: function (id, team) { var p = AROOM.getPlayer(id); if (p) p.team = team; },
+    setPlayerTeam: function (id, team) { var p = AROOM.getPlayer(id); if (p && p.team !== team) { p.team = team; if (AROOM.onPlayerTeamChange) AROOM.onPlayerTeamChange(p, null); } },
     kickPlayer: function (id, reason) { AKICK.push({ id: id, reason: reason }); _ap = _ap.filter(function (x) { return x.id !== id; }); },
     restartGame: function () {},
   };
@@ -335,6 +335,27 @@ try {
   AROOM.onGameEnd();
   AROOM.onGameEnd2();
   check('URL map name trimmed to filename', AANN.some(function (a) { return a.msg === 'Loading next map: xy.png'; }));
+
+  // ══ 6. >2 eject guard (LMS: only team 0/1) ══
+  // reset to a clean 1v1
+  _ap = _ap.filter(function (p) { return p.team !== 0; }).slice(0, 2);
+  _ap.forEach(function (p) { p.team = 1; });
+  var before = HOST.getActivePlayers().length;
+  check('clean 1v1 has exactly 2 active', before === 2);
+  // a clean team change (a legit leaver's seat backfill etc.) must NOT bounce
+  AANN.length = 0;
+  AROOM.onPlayerTeamChange(HOST.getActivePlayers()[0], null);
+  check('guard silent in a clean 1v1', HOST.getActivePlayers().length === 2 && !AANN.some(function (a) { return a.msg.indexOf('duel is already running') >= 0; }));
+  // now force a 3rd onto team 1 (lock leak / admin push) and fire the handler
+  var intruder = { id: 99, name: 'Intruder', auth: 'ar-x', team: 1 };
+  _ap.push(intruder);
+  check('3 active before guard runs', HOST.getActivePlayers().length === 3);
+  AANN.length = 0;
+  AROOM.onPlayerTeamChange(intruder, { id: 1, name: 'admin' }); // bp set = admin push
+  check('guard ejected the intruder to spectator', AROOM.getPlayer(99).team === 0);
+  check('back to exactly 2 on the field', HOST.getActivePlayers().length === 2);
+  check('intruder was queued', window.__ARENA_IN_QUEUE(99) === true);
+  check('intruder told they were queued', AANN.some(function (a) { return a.msg.indexOf('duel is already running') >= 0; }));
 
 } catch (err) {
   RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });
