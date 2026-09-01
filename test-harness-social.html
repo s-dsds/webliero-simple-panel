@@ -263,8 +263,9 @@ try {
     getPlayerList: function () { return _ap; },
     getPlayer: function (id) { return _ap.find(function (p) { return p.id === id; }) || null; },
     getPlayerScore: function (id) { var p = AROOM.getPlayer(id); return p ? { score: p.score || 0 } : null; },
-    getSettings: function () { return { teamsLocked: false }; },
-    setSettings: function () {},
+    _settings: { teamsLocked: false },
+    getSettings: function () { return { teamsLocked: AROOM._settings.teamsLocked }; },
+    setSettings: function (s) { AROOM._settings.teamsLocked = s.teamsLocked; },
     sendAnnouncement: function (msg, target, color, style, sound) { AANN.push({ msg: String(msg), target: target == null ? null : target, color: color, style: style, sound: sound }); },
     setPlayerTeam: function (id, team) { var p = AROOM.getPlayer(id); if (p && p.team !== team) { p.team = team; if (AROOM.onPlayerTeamChange) AROOM.onPlayerTeamChange(p, null); } },
     kickPlayer: function (id, reason) { AKICK.push({ id: id, reason: reason }); _ap = _ap.filter(function (x) { return x.id !== id; }); },
@@ -356,6 +357,11 @@ try {
   check('back to exactly 2 on the field', HOST.getActivePlayers().length === 2);
   check('intruder was queued', window.__ARENA_IN_QUEUE(99) === true);
   check('intruder told they were queued', AANN.some(function (a) { return a.msg.indexOf('duel is already running') >= 0; }));
+
+  // ══ 7. root fix: lock stays ON while someone is WAITING (closes the !q-swap window) ══
+  // intruder (id 99) is now queued; 2 playing. Any team change must keep it locked.
+  AROOM.onPlayerTeamChange(HOST.getActivePlayers()[0], null);
+  check('locked while a player is waiting', AROOM._settings.teamsLocked === true && window.__ARENA_IN_QUEUE(99));
 
 } catch (err) {
   RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });

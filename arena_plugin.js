@@ -55,6 +55,13 @@ var ARENA_PLUGIN = (function () {
       if (sett.teamsLocked !== b) { sett.teamsLocked = b; host.room.setSettings(sett); }
     } catch (e) { console.log('arena: setLock failed: ' + e); }
   }
+  // ROOT of the "multiple pushed in" race: teamsLocked must stay ON not just
+  // when the field is full, but whenever anyone is WAITING — otherwise a swap
+  // (e.g. !q specs the leaver first, dropping to 1 active) briefly unlocks the
+  // room and queued players self-join a team before the replacement locks it.
+  // With waiters, self-joining is never allowed (you wait your turn), so the
+  // window never opens. The >2 guard remains the backstop.
+  function lockState() { return isFull() || !playerqueue.isEmpty(); }
   // arena's announceEmphasizeToPlayerOnly: loud+pinged for the target, silent
   // text for everyone else. Inlined (the fork's announce hardcodes sound=1).
   function announceEmphasize(msg, target, color, style) {
@@ -311,7 +318,7 @@ var ARENA_PLUGIN = (function () {
         moveToGame(pe);
         room.restartGame();
       }
-      setLock(full); // SAFEGUARD: teamsLocked tracks fullness
+      setLock(lockState()); // locked while full OR anyone is waiting
       emitQueue();   // a playing leaver changes the playing set without touching the queue
     });
 
@@ -319,7 +326,7 @@ var ARENA_PLUGIN = (function () {
     // game leaves the queue (no double-booking); a manual mid-round join
     // restarts so starting scores are correct.
     chain(room, 'onPlayerTeamChange', function (p, bp) {
-      setLock(isFull());
+      setLock(lockState());
       if (p.team !== 0) playerqueue.remove(p);
       // HARD INVARIANT: never more than 2 on the field. teamsLocked SHOULD stop
       // a 3rd from joining, but it has been observed to leak here (mass
@@ -404,7 +411,7 @@ var ARENA_PLUGIN = (function () {
       return playerqueue != null && playerqueue.q.some(function (e) { return e.id === pid; });
     };
 
-    setLock(isFull()); // establish lock state at boot
+    setLock(lockState()); // establish lock state at boot (full or anyone waiting)
     emitQueue();       // initial snapshot for the live-queue widget
   }
 
