@@ -95,6 +95,30 @@ function inc(v){ return v && typeof v==='object' && '__inc' in v ? v.__inc : v; 
   assert('T2 tie → neither wins', u['players/aA/wins']===undefined && u['players/aB/wins']===undefined);
   assert('T2 tie placeSumNorm both 0.5', Math.abs(inc(u['players/aA/placeSumNorm'])-0.5)<1e-9 && Math.abs(inc(u['players/aB/placeSumNorm'])-0.5)<1e-9);
 
+  // ===== Test 2b: NO-CONTEST (0 kills, 0 deaths) counts as nothing =====
+  setPlayers([
+    {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},
+    {id:2,name:'Bob',  auth:'aB',team:1,score:0,kills:0,deaths:0},
+  ]);
+  window.WLROOM.onGameStart(); await new Promise(r=>setTimeout(r,20));
+  // nobody kills or dies — a dead round
+  CAPTURED.updates=[]; window.WLROOM.onGameEnd(); u=lastUpdate();
+  assert('T2b no-contest: no ELO written', u['players/aA/elo']===undefined && u['players/aB/elo']===undefined);
+  assert('T2b no-contest: no games', u['players/aA/games']===undefined && u['players/aB/games']===undefined);
+  assert('T2b no-contest: no partialGames', u['players/aA/partialGames']===undefined && u['players/aB/partialGames']===undefined);
+  assert('T2b no-contest: no wins/placeSumNorm', u['players/aA/wins']===undefined && u['players/aA/placeSumNorm']===undefined);
+  assert('T2b no-contest: no h2h', !Object.keys(u).some(k=>/^h2h\//.test(k)));
+  assert('T2b no-contest: no daily games, has noContest counter', !Object.keys(u).some(k=>/daily\/.*\/games$/.test(k)) && Object.keys(u).some(k=>/daily\/.*\/noContest$/.test(k)));
+  // control: a tie WITH a kill IS a real draw and still counts
+  setPlayers([
+    {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},
+    {id:2,name:'Bob',  auth:'aB',team:1,score:0,kills:0,deaths:0},
+  ]);
+  window.WLROOM.onGameStart(); await new Promise(r=>setTimeout(r,20));
+  _players[0].kills=1; _players[1].deaths=1; // one trade → real game, still a score tie (both 0 lives-delta... use kills)
+  CAPTURED.updates=[]; window.WLROOM.onGameEnd(); u=lastUpdate();
+  assert('T2b control: tie WITH a kill still counts (elo written)', typeof u['players/aA/elo']==='number' && typeof u['players/aB/elo']==='number');
+
   // ===== Test 3: mid-session joiner =====
   setPlayers([
     {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},

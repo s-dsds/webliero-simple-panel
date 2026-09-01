@@ -797,6 +797,25 @@ function statsOnGameEnd() {
     var N = full.length;
     var gameKills = 0;
 
+    // No-contest: a FULL game where nobody killed or died (0 combat activity).
+    // A dead round — both idled/timed out with no engagement — counts as
+    // NOTHING: no ELO, no games/wins, no duel/h2h/daily. (A tie WITH kills is a
+    // real draw and still counts.) Restores the arena reference's "game with no
+    // kills or deaths detected" skip. It is still emitted to history, flagged,
+    // so the round is visible; joins/chat/exits still accrue below.
+    var gameActivity = 0;
+    var topRank = -Infinity, topCount = 0;
+    for (var ga of full) {
+        gameActivity += (ga.dKills || 0) + (ga.dDeaths || 0);
+        if (ga.rankScore > topRank) { topRank = ga.rankScore; topCount = 1; }
+        else if (ga.rankScore === topRank) { topCount++; }
+    }
+    // A decisive result (a unique top rankScore) always counts, even in the
+    // rare/synthetic case of no recorded kills+deaths. Only a genuine TIE with
+    // zero engagement is the dead round the owner means. (In real LMS, zero
+    // activity ⇒ nobody lost a life ⇒ everyone tied, so this is automatic.)
+    var noContest = (N >= 2 && gameActivity === 0 && topCount >= 2);
+
     // Capability probe (§2, hard requirement) — must run before AFK is
     // trusted for THIS round's classification. Fed ONLY by real
     // onPlayerActivity events (statsRealActivityEvents), not statsAct.size —
@@ -825,7 +844,7 @@ function statsOnGameEnd() {
     // ranking + ELO over FULL-GAME participants only — ranked on rankScore
     // (§3 phase 1b), not dScore. In up-modes rankScore === dScore, so this is
     // byte-identical to today there; in LMS it is now the lives stock.
-    if (N >= 2) {
+    if (N >= 2 && !noContest) {
         statsAssignRanks(full);              // sets p.rank
         statsComputeElo(full, N);            // sets p.newElo
     }
@@ -856,7 +875,11 @@ function statsOnGameEnd() {
         }
 
         var formEntry = { ts: now, kills: p.dKills, deaths: p.dDeaths, suicides: (statsSuicides.get(p.auth) || 0) };
-        if (p.midSession || N < 2) {
+        if (noContest) {
+            // dead round: nothing counts — not even partialGames. Only the
+            // activity credit above (all zero here) and lastSeen/name persist.
+            formEntry.noContest = true;
+        } else if (p.midSession || N < 2) {
             updates[`${base}/partialGames`] = statsInc(1);
             formEntry.partial = true;
         } else {
@@ -889,7 +912,7 @@ function statsOnGameEnd() {
         // form: append + cap (absolute write of the trimmed ring) — same §5
         // trap as elo: skip until seeded, or a short game truncates a 20-entry
         // ring to 1.
-        if (p.seeded) {
+        if (p.seeded && !noContest) {
             var form = (p.form || []).concat([formEntry]);
             if (form.length > STATS_FORM_CAP) form = form.slice(form.length - STATS_FORM_CAP);
             updates[`${base}/form`] = form;
@@ -991,7 +1014,7 @@ function statsOnGameEnd() {
     // League index — UNCONDITIONAL (unlike the mods index above, which sits in
     // the weapons-enabled branch and skips hit-less games): "games increments
     // once per game" is a phase-5 assertion (arena-leagues.md §7.3).
-    if (statsGameLeague) {
+    if (statsGameLeague && !noContest) {
         updates[`leagues/${statsGameLeague.id}/name`] = statsGameLeague.name;
         updates[`leagues/${statsGameLeague.id}/lastUsed`] = Date.now();
         updates[`leagues/${statsGameLeague.id}/games`] = statsInc(1);
@@ -1016,7 +1039,7 @@ function statsOnGameEnd() {
     // fastest win), per-pair h2h counters, per-auth-per-map counters, duel
     // duration as sum+count. Never per-game rows (spec: plugin-architecture §6d
     // — the scalable replacement for arena's unbounded gamestats replay).
-    if (N === 2) {
+    if (N === 2 && !noContest) {
         var d0 = full[0], d1 = full[1];
         var duelMs = statsGameStartTs > 0 ? (now - statsGameStartTs) : 0;
         var winner = null, loser = null;
@@ -1077,12 +1100,15 @@ function statsOnGameEnd() {
     // spectator's map cycling) are not games — the @@GAME@@ emission below
     // already skips them; the rollup must agree or daily/games and level
     // counts drift from the gamestore by hundreds overnight.
-    if (parts.length > 0) {
+    if (parts.length > 0 && !noContest) {
         updates[`daily/${day}/games`] = statsInc(1);
         updates[`daily/${day}/kills`] = statsInc(gameKills);
         if (newToday > 0) updates[`daily/${day}/uniquePlayers`] = statsInc(newToday);
         var lvl = statsCurrentLevelName();
         if (lvl) updates[`levels/${statsSafeKey(lvl)}/count`] = statsInc(1);
+    } else if (noContest) {
+        // observability: a counter so dead rounds are visible without inflating games
+        updates[`daily/${day}/noContest`] = statsInc(1);
     }
 
     if (statsHasIncrement) {
@@ -1101,7 +1127,9 @@ function statsOnGameEnd() {
         var emitPlayers = parts.map(function (p) {
             var e = { auth: p.auth, name: p.name, team: (p.team != null ? p.team : null),
                       score: p.dScore, kills: p.dKills, deaths: p.dDeaths, rankScore: p.rankScore };
-            if (p.midSession || N < 2) {
+            if (noContest) {
+                e.noContest = true; // dead round — rank/elo undefined, nothing counted
+            } else if (p.midSession || N < 2) {
                 e.partial = true; // rank/elo are undefined for these — omit
             } else {
                 e.rank = p.rank;
@@ -1120,7 +1148,7 @@ function statsOnGameEnd() {
             return e;
         });
         var emitWinner = null;
-        if (N >= 2) {
+        if (N >= 2 && !noContest) {
             // statsAssignRanks averages ties (a top tie yields rank 1.5), so a
             // single rank===1 player is THE winner; anything else = null.
             var tops = full.filter(function (p) { return p.rank === 1; });
@@ -1131,8 +1159,9 @@ function statsOnGameEnd() {
             map: (typeof statsCurrentLevelName === 'function' && statsCurrentLevelName()) || '',
             n: N,
             mode: mode,
-            nRanked: N,       // phase 1/1b: ranked === full (excuse/forfeit is phase 2)
-            unranked: N < 2,
+            nRanked: noContest ? 0 : N,       // phase 1/1b: ranked === full (excuse/forfeit is phase 2)
+            unranked: N < 2 || noContest,
+            noContest: noContest,
             durationMs: statsGameStartTs > 0 ? (now - statsGameStartTs) : 0, // 0 = spanned a script reload
             players: emitPlayers,
             winner: emitWinner,
