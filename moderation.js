@@ -20,6 +20,13 @@ var bansRef;
 var moderationBootAt = Date.now();
 var moderationReplayed = false;
 
+// Mutes: like bans, but they suppress a player's CHAT instead of kicking, and
+// auto-expire (default 30s, 0 = indefinite). Keyed by auth so a mute survives
+// a rejoin. Same event-log replay as bans (panel + in-room records apply live).
+var activeMutes = new Map(); // key -> {name, nameLower, auth, expiresAt, reason, at}
+var mutedNames = new Map();  // lowercased name -> mute key (name-target mutes)
+var mutesRef;
+
 function initModeration() {
     if (typeof fdb == 'undefined' || !fdb) {
         setTimeout(initModeration, 200);
@@ -31,6 +38,7 @@ function initModeration() {
     // converges.
     moderationRef = fdb.ref(primaryPath('moderation'));
     bansRef = fdb.ref(primaryPath('bans'));
+    mutesRef = fdb.ref(primaryPath('mutes'));
     // Replay history, then stay subscribed: child_added fires in key order
     // (epoch-ms keys), first for every existing record, then for each new one
     // (panel writes included). Records older than boot only rebuild state;
@@ -130,6 +138,35 @@ function applyModerationRecord(r, live) {
         // unban by whatever key the ban was stored under
         unregisterBan(banKeyFor(r.target) || "");
         if (live) { try { window.WLROOM.clearBans(); } catch (e) {} }
+    } else if (r.type == "mute") {
+        if (r.expiresAt && r.expiresAt <= now) {
+            return;
+        }
+        const nameLower = r.target.name ? String(r.target.name).toLowerCase() : null;
+        const mrec = {
+            name: r.target.name || "",
+            nameLower: r.target.matchName ? nameLower : null, // only name-mutes enforce by name
+            auth: r.target.auth || null,
+            expiresAt: r.expiresAt ?? null,
+            reason: r.reason || "",
+            at: r.at
+        };
+        registerMute(muteKeyFor(r.target) || ("at:" + r.at), mrec);
+        // schedule a summary-node refresh when a timed mute lapses, so the
+        // panel's Active mutes list drops it without waiting for the next write
+        if (mrec.expiresAt) {
+            const ms = mrec.expiresAt - Date.now();
+            if (ms > 0 && ms < 3600000) { setTimeout(syncMutesNode, ms + 200); }
+        }
+        if (live) {
+            for (const p of onlinePlayersMatchingMute(mrec)) {
+                announce(muteNotice(mrec), p, COLORS.WARNING);
+            }
+        }
+        syncMutesNode();
+    } else if (r.type == "unmute") {
+        unregisterMute(muteKeyFor(r.target) || "");
+        syncMutesNode();
     } else if (r.type == "kick" && live) {
         // targeted single kick: by auth if known, else by name
         var kicked = findOnlinePlayersByAuth(r.target.auth);
@@ -194,6 +231,131 @@ function syncBansNode() {
     bansRef.set(out);
 }
 function statsSafeBanKey(k) { return String(k).replace(/[.#$/\[\]]/g, "_").slice(0, 200); }
+
+// ── mutes (chat suppression; auth-keyed so they survive a rejoin) ──
+function muteKeyFor(t) {
+    if (t.auth) { return t.auth; }
+    if (t.name) { return "name:" + String(t.name).toLowerCase(); }
+    return null;
+}
+function registerMute(key, rec) {
+    activeMutes.set(key, rec);
+    if (rec.nameLower) { mutedNames.set(rec.nameLower, key); }
+}
+function unregisterMute(key) {
+    const rec = activeMutes.get(key);
+    if (!rec) { return null; }
+    if (rec.nameLower && mutedNames.get(rec.nameLower) == key) { mutedNames.delete(rec.nameLower); }
+    activeMutes.delete(key);
+    return rec;
+}
+// active mute matching a player descriptor {auth, name}, or null. Lazily drops
+// expired mutes so a 30s mute clears itself the moment it lapses.
+function matchActiveMute(d) {
+    let rec = d.auth ? activeMutes.get(d.auth) : null;
+    if (!muteNotExpired(rec) && d.name && mutedNames.has(String(d.name).toLowerCase())) {
+        rec = activeMutes.get(mutedNames.get(String(d.name).toLowerCase()));
+    }
+    return muteNotExpired(rec) ? rec : null;
+}
+function muteNotExpired(rec) {
+    return rec && (!rec.expiresAt || rec.expiresAt > Date.now());
+}
+function onlinePlayersMatchingMute(rec) {
+    const out = [];
+    const push = (p) => { if (out.indexOf(p) < 0) { out.push(p); } };
+    if (rec.auth) { findOnlinePlayersByAuth(rec.auth).forEach(push); }
+    if (rec.nameLower) { findOnlinePlayersByName(rec.name).forEach(push); }
+    return out;
+}
+function muteNotice(rec) {
+    const secs = rec.expiresAt ? Math.max(1, Math.ceil((rec.expiresAt - Date.now()) / 1000)) : 0;
+    return (secs ? `you are muted for ${secs}s` : `you are muted`) + (rec.reason ? ` (${rec.reason})` : "");
+}
+// Mirror activeMutes into the `mutes` summary node (whole-node set, self-heals
+// on expiry) so the panel can show active mutes without scanning the log.
+function syncMutesNode() {
+    if (!moderationReplayed || !mutesRef) {
+        return;
+    }
+    const out = {};
+    const now = Date.now();
+    for (const [key, rec] of activeMutes) {
+        if (rec.expiresAt && rec.expiresAt <= now) {
+            unregisterMute(key);
+            continue;
+        }
+        out[statsSafeBanKey(key)] = {
+            name: rec.name, auth: rec.auth || null, byName: !!rec.nameLower,
+            expiresAt: rec.expiresAt || null, reason: rec.reason, at: rec.at
+        };
+    }
+    mutesRef.set(out);
+}
+
+// Suppress a muted player's chat. Chained onto onPlayerChat: returning false
+// stops the broadcast (same mechanism the command registry uses). Guarded so a
+// hot-reload of this file doesn't stack a second suppressor.
+if (!window.__MUTE_CHAINED) {
+    window.__MUTE_CHAINED = true;
+    chainFunction(window.WLROOM, 'onPlayerChat', function (player, message) {
+        const rec = matchActiveMute({ auth: auth.get(player.id), name: player.name });
+        if (rec) {
+            announce(muteNotice(rec), player, COLORS.WARNING);
+            return false; // do not broadcast
+        }
+    });
+}
+
+function doMuteTarget(byPlayer, target, seconds, reason, announceName) {
+    const now = Date.now();
+    const expiresAt = seconds > 0 ? now + seconds * 1000 : null;
+    const record = {
+        type: "mute",
+        target: { name: target.name || "", auth: target.auth || null, matchName: !!target.matchName },
+        by: { name: byPlayer.name, auth: auth.get(byPlayer.id) },
+        reason: reason || "", at: now, formatted: (new Date(now).toLocaleString()), expiresAt: expiresAt
+    };
+    const nameLower = target.name ? String(target.name).toLowerCase() : null;
+    const rec = {
+        name: target.name || "", nameLower: target.matchName ? nameLower : null,
+        auth: target.auth || null, expiresAt: expiresAt, reason: reason || "", at: now
+    };
+    registerMute(muteKeyFor(target) || ("at:" + now), rec);
+    if (expiresAt) { const ms = expiresAt - now; if (ms > 0 && ms < 3600000) setTimeout(syncMutesNode, ms + 200); }
+    for (const p of onlinePlayersMatchingMute(rec)) { announce(muteNotice(rec), p, COLORS.WARNING); }
+    persistModeration(record);
+    syncMutesNode();
+    announce(`${announceName} was muted${seconds ? " for " + seconds + "s" : " indefinitely"}${reason ? " (" + reason + ")" : ""}`, null, COLORS.ANNOUNCE_BRIGHT);
+}
+
+function doMute(byPlayer, targetPlayer, seconds, reason) {
+    doMuteTarget(byPlayer, { name: targetPlayer.name, auth: auth.get(targetPlayer.id) }, seconds, reason, targetPlayer.name);
+}
+
+function resolveMuteKey(token) {
+    if (!token) { return null; }
+    if (activeMutes.has(token)) { return token; }               // exact auth key
+    const lower = token.toLowerCase();
+    if (mutedNames.has(lower)) { return mutedNames.get(lower); } // exact name
+    for (const [key, rec] of activeMutes) {                       // name prefix
+        if (rec.name && rec.name.toLowerCase().startsWith(lower)) { return key; }
+    }
+    return null;
+}
+
+function doUnmute(byPlayer, key) {
+    const rec = unregisterMute(key);
+    syncMutesNode();
+    const now = Date.now();
+    persistModeration({
+        type: "unmute",
+        target: { name: rec ? rec.name : "", auth: rec ? rec.auth : null, matchName: rec ? !!rec.nameLower : false },
+        by: { name: byPlayer.name, auth: auth.get(byPlayer.id) },
+        at: now, formatted: (new Date(now).toLocaleString())
+    });
+    announce(`mute removed (${rec ? (rec.name || rec.auth || key) : key})`, null, COLORS.ANNOUNCE_BRIGHT);
+}
 
 function persistModeration(record) {
     moderationRef.child(record.at).set(record);
@@ -340,6 +502,32 @@ COMMAND_REGISTRY.add("unban", ["!unban <auth-or-name>: removes an active ban"], 
         return false;
     }
     doUnban(player, key);
+    return false;
+}, COMMAND.ADMIN_ONLY);
+
+COMMAND_REGISTRY.add(["mute", "m"], ["!mute <name-or-#id> [seconds] [reason]: mutes a player's chat (default 30s, 0 = indefinite; survives rejoin)"], (player, target, ...rest) => {
+    const targetPlayer = findTargetPlayer(target);
+    if (!targetPlayer) {
+        announce(`player "${target}" not found`, player, COLORS.ERROR);
+        return false;
+    }
+    let seconds = 30; // default
+    let reasonParts = rest;
+    if (rest.length > 0 && rest[0] !== "" && !isNaN(rest[0])) {
+        seconds = Math.max(0, parseInt(rest[0], 10));
+        reasonParts = rest.slice(1);
+    }
+    doMute(player, targetPlayer, seconds, reasonParts.join(" "));
+    return false;
+}, COMMAND.ADMIN_ONLY);
+
+COMMAND_REGISTRY.add("unmute", ["!unmute <auth-or-name>: removes an active mute"], (player, target) => {
+    const key = resolveMuteKey(target);
+    if (!key) {
+        announce(`no active mute found for "${target}"`, player, COLORS.ERROR);
+        return false;
+    }
+    doUnmute(player, key);
     return false;
 }, COMMAND.ADMIN_ONLY);
 

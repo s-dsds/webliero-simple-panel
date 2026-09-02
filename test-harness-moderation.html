@@ -1,0 +1,120 @@
+<!DOCTYPE html><html><head><meta charset=utf-8></head><body><pre id="out"></pre>
+<script>
+// test-harness-moderation.html — mute: chat suppression, rejoin persistence,
+// expiry, indefinite, unmute, admin-only command. Loads the REAL moderation.js.
+// Run: chrome --headless=new --no-sandbox --allow-file-access-from-files --virtual-time-budget=15000 --dump-dom
+// Verdict in <title>: MOD_OK / MOD_FAIL(n).
+
+var CONFIG = { room_id: 'test' };
+var baseRoomName = 'simple';
+function primaryPath(n) { return baseRoomName + '/' + CONFIG.room_id + '/' + n; }
+function localPath(n) { return baseRoomName + '/' + CONFIG.room_id + '/' + n; }
+var auth = new Map();
+var conn = new Map();
+function chainFunction(object, attribute, func) {
+  var original = object[attribute];
+  if (original) {
+    object[attribute] = function () {
+      var or = original.apply(object, arguments);
+      var r = func.apply(object, arguments);
+      if (false == r || false == or) return false;
+    };
+  } else { object[attribute] = func; }
+}
+var COMMAND = { SUPER_ADMIN_ONLY: 2, ADMIN_ONLY: 1, FOR_ALL: 0 };
+var COLORS = { ERROR: 1, WARNING: 2, ANNOUNCE_BRIGHT: 3, INFO: 4 };
+var CMDS = new Map();
+var COMMAND_REGISTRY = { add: function (n, u, f, perm) { (Array.isArray(n) ? n : [n]).forEach(function (x) { CMDS.set(x, { f: f, perm: perm }); }); } };
+var ANN = [];
+function announce(msg, player, color) { ANN.push({ msg: String(msg), target: player == null ? null : (player.id != null ? player.id : player) }); }
+var MODWRITES = [];
+function fakeRef(path) {
+  return {
+    _p: path,
+    child: function (c) { return fakeRef(path + '/' + c); },
+    once: function () { return Promise.resolve({ val: function () { return {}; } }); },
+    on: function () {}, orderByKey: function () { return this; }, startAt: function () { return this; },
+    set: function (v) { MODWRITES.push({ path: path, v: v }); return Promise.resolve(); },
+  };
+}
+var fdb = { ref: function (p) { return fakeRef(p); } };
+var _players = [];
+var WLROOM = {
+  getPlayerList: function () { return _players; },
+  getPlayer: function (id) { return _players.find(function (p) { return p.id === id; }) || null; },
+  setPlayerTeam: function () {}, kickPlayer: function () {}, clearBans: function () {},
+  sendAnnouncement: function () {},
+  onPlayerChat: function () {}, // base handler (moderation chains onto it)
+};
+window.WLROOM = WLROOM;
+function setPlayers(list) { _players = list; auth.clear(); list.forEach(function (p) { auth.set(p.id, p.auth); }); }
+</script>
+<script src="./moderation.js"></script>
+<script>
+var R = [];
+function check(n, c) { R.push({ n: n, ok: !!c }); document.getElementById('out').textContent += (c ? 'PASS ' : 'FAIL ') + n + '\n'; }
+function chat(p, m) { return WLROOM.onPlayerChat(p, m); } // false = suppressed
+
+(function () {
+try {
+  // force the mute summary sync to run (moderationReplayed gate)
+  moderationReplayed = true;
+
+  var now = Date.now();
+  setPlayers([{ id: 1, name: 'Muted', auth: 'auth-M' }, { id: 2, name: 'Free', auth: 'auth-F' }]);
+
+  // ── 1. a 30s mute suppresses that player's chat only ──
+  applyModerationRecord({ type: 'mute', target: { name: 'Muted', auth: 'auth-M' }, expiresAt: now + 30000, reason: 'spam', at: now }, true);
+  check('muted player registered', activeMutes.has('auth-M'));
+  check('muted player chat suppressed (false)', chat(WLROOM.getPlayer(1), 'hello') === false);
+  check('muted player got a private notice', ANN.some(function (a) { return a.target === 1 && a.msg.indexOf('muted') >= 0; }));
+  check('other player chat NOT suppressed', chat(WLROOM.getPlayer(2), 'hi') !== false);
+
+  // ── 2. persists across a rejoin (new id, same auth) ──
+  setPlayers([{ id: 7, name: 'Muted', auth: 'auth-M' }]);
+  check('still muted after rejoin (auth-keyed)', chat(WLROOM.getPlayer(7), 'again') === false);
+
+  // ── 3. expiry: a mute whose time has passed no longer suppresses ──
+  applyModerationRecord({ type: 'mute', target: { name: 'Free', auth: 'auth-F' }, expiresAt: now - 1000, at: now - 31000 }, true);
+  setPlayers([{ id: 8, name: 'Free', auth: 'auth-F' }]);
+  check('expired mute does not suppress', chat(WLROOM.getPlayer(8), 'ok') !== false);
+
+  // ── 4. indefinite mute (expiresAt null) never expires ──
+  applyModerationRecord({ type: 'mute', target: { name: 'Perma', auth: 'auth-P' }, expiresAt: null, at: now }, true);
+  setPlayers([{ id: 9, name: 'Perma', auth: 'auth-P' }]);
+  check('indefinite mute suppresses', chat(WLROOM.getPlayer(9), 'x') === false);
+  check('indefinite mute has null expiresAt', activeMutes.get('auth-P').expiresAt == null);
+
+  // ── 5. unmute clears it ──
+  applyModerationRecord({ type: 'unmute', target: { auth: 'auth-P' }, at: now }, true);
+  check('unmute removed the mute', !activeMutes.has('auth-P'));
+  check('unmuted player can chat', chat(WLROOM.getPlayer(9), 'free now') !== false);
+
+  // ── 6. mutes summary node written for the panel ──
+  check('mutes summary node synced', MODWRITES.some(function (w) { return /\/mutes$/.test(w.path); }));
+
+  // ── 7. commands registered admin-only ──
+  check('!mute + !m + !unmute registered', CMDS.has('mute') && CMDS.has('m') && CMDS.has('unmute'));
+  check('!mute is admin-only', CMDS.get('mute').perm === COMMAND.ADMIN_ONLY);
+
+  // ── 8. !mute command: default 30s + reason parse ──
+  ANN.length = 0; MODWRITES.length = 0;
+  setPlayers([{ id: 10, name: 'Admin', auth: 'auth-A' }, { id: 11, name: 'Target', auth: 'auth-T' }]);
+  CMDS.get('mute').f(WLROOM.getPlayer(10), 'Target', 'being', 'rude'); // no number -> default 30s, reason "being rude"
+  check('!mute default applied a mute', activeMutes.has('auth-T'));
+  var mrec = activeMutes.get('auth-T');
+  check('!mute default is 30s', mrec.expiresAt && mrec.expiresAt - Date.now() > 25000 && mrec.expiresAt - Date.now() <= 30000);
+  check('!mute reason parsed (no leading number)', mrec.reason === 'being rude');
+  // explicit 0 = indefinite
+  CMDS.get('mute').f(WLROOM.getPlayer(10), 'Target', '0');
+  check('!mute 0 = indefinite', activeMutes.get('auth-T').expiresAt == null);
+
+} catch (e) {
+  R.push({ n: 'crash: ' + (e && e.stack || e), ok: false });
+  document.getElementById('out').textContent += 'CRASH ' + (e && e.stack || e) + '\n';
+}
+  var f = R.filter(function (r) { return !r.ok; }).length;
+  document.title = f === 0 ? 'MOD_OK (' + R.length + ')' : 'MOD_FAIL(' + f + '/' + R.length + ')';
+})();
+</script>
+</body></html>
