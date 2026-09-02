@@ -208,14 +208,19 @@ var ARENA_PLUGIN = (function () {
     announceEmphasize('>> @' + next.name + ' is to enter the arena next replacing ' + outmsg + ' <<', next, 0xDD91C6, 'bold');
   }
 
-  function moveToGameIfSomeoneIsWaiting(force) {
-    // NEVER exceed 2, force or not. `force` only bypasses the hasActive()
-    // requirement (fill an EMPTY field from the queue) — it must NOT bypass
-    // the fullness cap. The old `force || …` pushed a queued player onto an
-    // already-full field: a second, lock-independent multi-push source (the
-    // AFK-evict hook and !q both pass force=true, and could fire while the
-    // field was already 2).
-    if (!isFull() && (force || hasActive()) && !playerqueue.isEmpty()) {
+  function moveToGameIfSomeoneIsWaiting(force, excludeId) {
+    // NEVER exceed 2, force or not — the fullness cap prevents the over-push
+    // (the 3-player bug). BUT webliero's setPlayerTeam is ASYNC: when this runs
+    // right after speccing a player (AFK evict / !q), that player is STILL
+    // counted as active for a tick, so a naive isFull() would (wrongly) see a
+    // full field and refuse the backfill — leaving the seat empty with someone
+    // waiting. excludeId drops the just-specced player from the count so the
+    // seat is seen as open. (leave paths pass no excludeId — the leaver is
+    // already off getPlayerList there.)
+    var active = host.getActivePlayers();
+    if (excludeId != null) active = active.filter(function (p) { return p.id !== excludeId; });
+    var full = active.length >= 2, any = active.length > 0;
+    if (!full && (force || any) && !playerqueue.isEmpty()) {
       var pe = playerqueue.shift();
       console.log('arena: moving ' + pe.name + ' to the game');
       moveToGame(pe);
@@ -335,12 +340,18 @@ var ARENA_PLUGIN = (function () {
       setLock(lockState());
       if (p.team !== 0) playerqueue.remove(p);
       // HARD INVARIANT: never more than 2 on the field. teamsLocked SHOULD stop
-      // a 3rd from joining, but it has been observed to leak here (mass
-      // simultaneous joins / admin push), and once 3+ are active the 2-player
-      // safeguards freeze the swap and it never self-corrects. So bounce the
-      // intruder — the player who just moved INTO a team and tipped us over 2 —
-      // straight back to spectator + the queue. Never fires in a clean 1v1.
-      if (p.team !== 0 && host.getActivePlayers().length > 2) {
+      // a 3rd from joining, but it has been observed to leak (mass simultaneous
+      // joins / admin push); once 3+ are active the 2-player safeguards freeze
+      // the swap and it never self-corrects. So bounce the intruder — the player
+      // who just moved INTO a team and tipped us over 2 — back to spectator +
+      // the queue.
+      // ONLY for HUMAN-initiated joins (bp != null: self-join or admin push).
+      // A SCRIPT move (bp == null: our own backfill/swap) is never an intruder,
+      // and MUST be exempt — setPlayerTeam is async, so a legit backfill can
+      // momentarily read as a 3rd while the just-evicted player's spec is still
+      // pending; ejecting it there was the "AFK-kicked, next player not pulled
+      // in" bug (the backfilled player got bounced right back).
+      if (bp != null && p.team !== 0 && host.getActivePlayers().length > 2) {
         playerqueue.add(p);   // queue them (emits its own snapshot)
         moveToSpec(p);        // → recurses here with p.team===0: no-op guard, relock
         host.announce('a duel is already running — you were queued (type !q to just spectate)', p, 0xDD2222, 'bold');
@@ -365,7 +376,9 @@ var ARENA_PLUGIN = (function () {
       host.announce("you'll have to type !join to play again", player);
       var full = player.team !== 0 && isFull();
       moveToSpec(player);
-      moveToGameIfSomeoneIsWaiting(full);
+      // exclude the just-specced player: their team change is async, so they'd
+      // otherwise still count toward the field and block the backfill.
+      moveToGameIfSomeoneIsWaiting(full, player.id);
       return false;
     }, C.FOR_ALL);
 
@@ -409,7 +422,9 @@ var ARENA_PLUGIN = (function () {
     // AFK eviction until someone joined or left. Subscribe to the hook the
     // fork's d_anti-afk now exposes.
     window.__AFK_EVICT_HOOKS = window.__AFK_EVICT_HOOKS || [];
-    window.__AFK_EVICT_HOOKS.push(function () { moveToGameIfSomeoneIsWaiting(true); });
+    // Pass the evicted id: setPlayerTeam(0) hasn't applied yet when this fires,
+    // so exclude them from the fullness check or the backfill sees a full field.
+    window.__AFK_EVICT_HOOKS.push(function (evictedId) { moveToGameIfSomeoneIsWaiting(true, evictedId); });
 
     // Queue-membership predicate for d_anti-afk's spectator purge: a spectator
     // WAITING for a duel seat is not AFK and must never be purge-kicked.

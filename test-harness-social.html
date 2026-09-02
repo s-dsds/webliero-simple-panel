@@ -382,6 +382,24 @@ try {
   check('AFK backfill pulled the waiter in', HOST.getActivePlayers().length === 2);
   check('waiter (99) is now playing, not queued', AROOM.getPlayer(99) && AROOM.getPlayer(99).team === 1 && window.__ARENA_IN_QUEUE(99) === false);
 
+  // ══ 9b. ASYNC spec: the evicted player is STILL team 1 when the hook fires ══
+  // (real webliero setPlayerTeam is async — the reported live bug). The backfill
+  // must still fire by EXCLUDING the evicted id from the fullness check.
+  // clean 1v1 + one waiter
+  _ap = _ap.filter(function (p) { return p.team !== 0; }).slice(0, 2);
+  _ap.forEach(function (p) { p.team = 1; });
+  var waiter = { id: 88, name: 'Waiter', auth: 'ar-w', team: 0 };
+  _ap.push(waiter);
+  AROOM.onPlayerJoin(waiter); // auto-queued (field full)
+  check('9b setup: 2 playing, waiter queued', HOST.getActivePlayers().length === 2 && window.__ARENA_IN_QUEUE(88));
+  var toEvict = HOST.getActivePlayers()[0];
+  // fire the hook WITHOUT changing toEvict's team yet (async spec not applied)
+  window.__AFK_EVICT_HOOKS.forEach(function (h) { h(toEvict.id); });
+  check('9b async: backfill fired despite evicted still counted', window.__ARENA_IN_QUEUE(88) === false && AROOM.getPlayer(88).team === 1);
+  // now the async spec lands → field settles at 2 (opponent + waiter)
+  toEvict.team = 0;
+  check('9b field settles at 2 after async spec applies', HOST.getActivePlayers().length === 2);
+
 } catch (err) {
   RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });
   document.getElementById('out').textContent += 'CRASH ' + (err && err.stack || err) + '\n';
