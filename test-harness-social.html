@@ -371,6 +371,17 @@ try {
   check('force-push refused while full (still 2)', HOST.getActivePlayers().length === 2);
   check('queued player NOT pulled onto a full field', window.__ARENA_IN_QUEUE(99) === beforeQ);
 
+  // ══ 9. AFK evict → backfill WITH a waiter (the "kicked but not pulled in" report) ══
+  // 2 playing + id 99 queued; an AFK evict specs one player, then fires the hook.
+  var players2 = HOST.getActivePlayers();
+  var evicted = players2[0];
+  check('setup: 2 playing + 1 waiting', players2.length === 2 && window.__ARENA_IN_QUEUE(99));
+  AROOM.setPlayerTeam(evicted.id, 0);        // AFK eviction moves them to spec (fires teamchange → lock stays on)
+  check('after evict: 1 on the field', HOST.getActivePlayers().length === 1);
+  window.__AFK_EVICT_HOOKS.forEach(function (h) { h(evicted.id); }); // hook backfills from the queue
+  check('AFK backfill pulled the waiter in', HOST.getActivePlayers().length === 2);
+  check('waiter (99) is now playing, not queued', AROOM.getPlayer(99) && AROOM.getPlayer(99).team === 1 && window.__ARENA_IN_QUEUE(99) === false);
+
 } catch (err) {
   RESULTS.push({ name: 'harness crashed: ' + (err && err.stack || err), ok: false });
   document.getElementById('out').textContent += 'CRASH ' + (err && err.stack || err) + '\n';
