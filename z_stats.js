@@ -815,6 +815,12 @@ function statsOnGameEnd() {
     // zero engagement is the dead round the owner means. (In real LMS, zero
     // activity ⇒ nobody lost a life ⇒ everyone tied, so this is automatic.)
     var noContest = (N >= 2 && gameActivity === 0 && topCount >= 2);
+    // Solo/empty "games" (a lone player waiting for an opponent — parts < 2)
+    // are not matches either: same treatment as no-contest for COUNTING (they
+    // count as nothing). Emission differs: solo is not emitted at all, while a
+    // no-contest tie still emits for the leaver/abandon history and is hidden
+    // from the recent-matches VIEW server-side. nonMatch = "don't count".
+    var nonMatch = noContest || parts.length < 2;
 
     // Capability probe (§2, hard requirement) — must run before AFK is
     // trusted for THIS round's classification. Fed ONLY by real
@@ -875,10 +881,11 @@ function statsOnGameEnd() {
         }
 
         var formEntry = { ts: now, kills: p.dKills, deaths: p.dDeaths, suicides: (statsSuicides.get(p.auth) || 0) };
-        if (noContest) {
-            // dead round: nothing counts — not even partialGames. Only the
-            // activity credit above (all zero here) and lastSeen/name persist.
-            formEntry.noContest = true;
+        if (nonMatch) {
+            // dead round (no-contest tie) or solo wait: nothing counts — not
+            // even partialGames. Only lastSeen/name persist (activity credit
+            // above is zero for a no-contest; a solo waiter may have kills=0).
+            formEntry.noContest = noContest;
         } else if (p.midSession || N < 2) {
             updates[`${base}/partialGames`] = statsInc(1);
             formEntry.partial = true;
@@ -912,7 +919,7 @@ function statsOnGameEnd() {
         // form: append + cap (absolute write of the trimmed ring) — same §5
         // trap as elo: skip until seeded, or a short game truncates a 20-entry
         // ring to 1.
-        if (p.seeded && !noContest) {
+        if (p.seeded && !nonMatch) {
             var form = (p.form || []).concat([formEntry]);
             if (form.length > STATS_FORM_CAP) form = form.slice(form.length - STATS_FORM_CAP);
             updates[`${base}/form`] = form;
@@ -1100,7 +1107,7 @@ function statsOnGameEnd() {
     // spectator's map cycling) are not games — the @@GAME@@ emission below
     // already skips them; the rollup must agree or daily/games and level
     // counts drift from the gamestore by hundreds overnight.
-    if (parts.length > 0 && !noContest) {
+    if (!nonMatch) {
         updates[`daily/${day}/games`] = statsInc(1);
         updates[`daily/${day}/kills`] = statsInc(gameKills);
         if (newToday > 0) updates[`daily/${day}/uniquePlayers`] = statsInc(newToday);
@@ -1120,9 +1127,12 @@ function statsOnGameEnd() {
     // @@GAME@@ emission → wlhl gamestore (spec: game-history.md §1). Console
     // line only — no RTDB write; per-game rows belong on the host's disk.
     // Fire-and-forget: history emission must never touch the game loop.
-    // Skip empty games (no participants at all — e.g. a lone spectator's map
-    // rotation): the store rejects them anyway, this just avoids log noise.
-    try { if (parts.length === 0) { statsParticipants.clear(); statsExits.clear(); return; } } catch (e) {}
+    // Skip SOLO/empty games entirely (no @@GAME@@): a lone player waiting for
+    // an opponent (parts < 2) has no match and no leaver/abandon value.
+    // No-contest ties (parts >= 2) STILL emit — the leaver/abandon record has
+    // value and history stays complete; the recent-matches VIEW filters them
+    // out server-side (ext-proxy isNoiseGameRow) and stats never counted them.
+    try { if (parts.length < 2) { statsParticipants.clear(); statsExits.clear(); return; } } catch (e) {}
     try {
         var emitPlayers = parts.map(function (p) {
             var e = { auth: p.auth, name: p.name, team: (p.team != null ? p.team : null),

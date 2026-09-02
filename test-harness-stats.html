@@ -119,6 +119,18 @@ function inc(v){ return v && typeof v==='object' && '__inc' in v ? v.__inc : v; 
   CAPTURED.updates=[]; window.WLROOM.onGameEnd(); u=lastUpdate();
   assert('T2b control: tie WITH a kill still counts (elo written)', typeof u['players/aA/elo']==='number' && typeof u['players/aB/elo']==='number');
 
+  // ===== Test 2c: SOLO game (one player waiting) counts as nothing =====
+  setPlayers([
+    {id:1,name:'Alice',auth:'aA',team:1,score:5,kills:0,deaths:0},
+  ]);
+  window.WLROOM.onGameStart(); await new Promise(r=>setTimeout(r,20));
+  CAPTURED.updates=[]; window.WLROOM.onGameEnd();
+  var solo = CAPTURED.updates.length ? lastUpdate() : {};
+  assert('T2c solo: no games', solo['players/aA/games']===undefined);
+  assert('T2c solo: no partialGames', solo['players/aA/partialGames']===undefined);
+  assert('T2c solo: no elo/form', solo['players/aA/elo']===undefined && solo['players/aA/form']===undefined);
+  assert('T2c solo: no daily games', !Object.keys(solo).some(k=>/daily\/.*\/games$/.test(k)));
+
   // ===== Test 3: mid-session joiner =====
   setPlayers([
     {id:1,name:'Alice',auth:'aA',team:1,score:0,kills:0,deaths:0},
