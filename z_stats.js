@@ -19,6 +19,12 @@ var STATS_KNOWN_MODES = { dm: 1, tdm: 1, htf: 1, dtf: 1, ctf: 1, ctf2: 1, haz: 1
 var statsRootRef;
 var statsLiveRef;
 var statsRegion = '';
+// Monotonic "aggregates changed" counter, bumped once per committed game.
+// Rides in the small stats/live node (polled by the stats page every 3s) so
+// viewers can refresh the leaderboard ONLY when a game actually ended, instead
+// of polling the big stats/players node on a timer. Survives nothing (resets
+// to 0 on restart) — the client keys off CHANGES, not the absolute value.
+var statsGen = 0;
 var statsSV;            // firebase.database.ServerValue
 var statsHasIncrement;  // confirmed at init (Risk 3 smoke)
 var statsGameInProgress = false;
@@ -193,14 +199,14 @@ function statsWriteLive() {
         if (!players.length) {
             if (statsLiveWasRunning) {
                 statsLiveWasRunning = false;
-                statsLiveRef.set({ inProgress: false, ts: Date.now() });
+                statsLiveRef.set({ inProgress: false, ts: Date.now(), gen: statsGen });
             }
             return;
         }
         statsLiveWasRunning = true;
         players.sort(function (a, b) { return b.score - a.score; });
         statsLiveRef.set({
-            inProgress: true, ts: Date.now(),
+            inProgress: true, ts: Date.now(), gen: statsGen,
             level: statsCurrentLevelName() || null,
             players: players,
             feed: statsKillFeed.slice(-STATS_FEED_CAP) // recent kills for the feed
@@ -1122,6 +1128,16 @@ function statsOnGameEnd() {
         statsRootRef.update(updates);
     } else {
         statsUpdateNoIncrement(updates);   // read-modify-write fallback
+    }
+
+    // Aggregates just changed for a REAL match → bump the generation counter so
+    // the stats page refreshes the leaderboard now (event-driven), instead of
+    // polling the big players node on a timer. Written directly to stats/live's
+    // `gen` child so an idle room (live writer stopped) still signals; the live
+    // writer echoes the same value on its next tick.
+    if (!nonMatch && statsLiveRef) {
+        statsGen++;
+        try { statsLiveRef.child('gen').set(statsGen); } catch (e) {}
     }
 
     // @@GAME@@ emission → wlhl gamestore (spec: game-history.md §1). Console
