@@ -1074,6 +1074,9 @@ function statsOnGameEnd() {
                     if (ns > (dp.bestStreak || 0)) updates[`${db}/bestStreak`] = ns; // absolute
                     if (duelMs > 0 && (!dp.fastestWinMs || duelMs < dp.fastestWinMs)) {
                         updates[`${db}/fastestWinMs`] = duelMs;                     // absolute
+                        // remember who was beaten in this fastest win (name
+                        // snapshot — the stats page shows "X beat Y in Ns")
+                        if (loser) updates[`${db}/fastestWinVs`] = (loser.name || loser.auth || '');
                     }
                 } else if (loser === dp) {
                     updates[`${db}/streak`] = 0;
@@ -1298,6 +1301,11 @@ var STATS_MEDALS = ["🥇", "🥈", "🥉"];
 function statsPageLink() {
     return STATS_BASE_URL.replace(/\/+$/, "") + "/stats/" + encodeURIComponent(CONFIG.room_id);
 }
+// A per-player deep link: opens the caller's own card directly (a single
+// indexed player read) — no leaderboard/full-node search on the page side.
+function statsPlayerLink(authKey) {
+    return statsPageLink() + "#player=" + encodeURIComponent(authKey);
+}
 function statsEloLine(rank, r, medal) {
     return rank + ". " + r.name + " — " + Math.round(r.elo) + " ELO with " + r.games +
         " game" + (r.games === 1 ? "" : "s") + " played" + (medal ? " " + medal : "");
@@ -1305,8 +1313,12 @@ function statsEloLine(rank, r, medal) {
 
 COMMAND_REGISTRY.add("stats", ["!stats: room stats page link + top 5 players by ELO"], function (player) {
     var link = statsPageLink();
-    if (!statsRootRef) { announce("Room stats: " + link, player.id, COLORS.INFO); return false; }
     var myAuth = player.auth || (typeof auth !== 'undefined' && auth.get ? auth.get(player.id) : null);
+    if (!statsRootRef) {
+        announce("Room stats: " + link, player.id, COLORS.INFO);
+        if (myAuth) announce("Your stats: " + statsPlayerLink(myAuth), player.id, COLORS.PRIVATE);
+        return false;
+    }
     statsRootRef.child('players').once('value').then(function (snap) {
         var rows = [];
         snap.forEach(function (c) {
@@ -1331,6 +1343,7 @@ COMMAND_REGISTRY.add("stats", ["!stats: room stats page link + top 5 players by 
             if (myIdx >= 5) announce("You: " + statsEloLine(myIdx + 1, rows[myIdx], null), player.id, COLORS.PRIVATE);
         }
         announce("Full stats: " + link, player.id, COLORS.INFO);
+        if (myAuth) announce("Your stats: " + statsPlayerLink(myAuth), player.id, COLORS.PRIVATE);
     }).catch(function () {
         announce("Room stats: " + link, player.id, COLORS.INFO); // link still works even if the read fails
     });
