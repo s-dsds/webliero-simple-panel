@@ -364,6 +364,8 @@ function statsSeedParticipant(a, id) {
 }
 
 var statsGameStartTs = 0; // for duel duration / fastest-win (1v1 extras)
+var statsGameMap = '';    // level THIS game is played on (captured at start)
+var statsMapRetry = null; // retry timer while a sub-pool pick resolves
 
 // Per-mod weapon buckets: "BAZOOKA" in one mod is not the same weapon as in
 // another, so weapon stats/medals are additionally bucketed by the mod the
@@ -406,6 +408,7 @@ function statsOnGameStart() {
     statsGameInProgress = true;
     statsGameStartTs = Date.now();
     statsCaptureMod();
+    statsCaptureMap();
     statsCaptureLeague();
     statsParticipants.clear();
     // reset per-game weapon/damage accumulators
@@ -1185,7 +1188,7 @@ function statsOnGameEnd() {
         }
         console.log('@@GAME@@ ' + JSON.stringify({
             ts: now,
-            map: (typeof statsCurrentLevelName === 'function' && statsCurrentLevelName()) || '',
+            map: statsGameMap || statsMapNameNow(),
             n: N,
             mode: mode,
             nRanked: noContest ? 0 : N,       // phase 1/1b: ranked === full (excuse/forfeit is phase 2)
@@ -1257,6 +1260,36 @@ function statsComputeElo(full, N) {
 
 function statsCurrentLevelName() {
     try { var s = window.WLROOM.getSettings(); return (s && (s.level || s.levelName)) || null; } catch (e) { return null; }
+}
+
+// The map name every @@GAME@@ row has been missing. getSettings() carries NO
+// level name (verified live: scoreLimit..weaponChangeDelay + levelPool, nothing
+// else), so statsCurrentLevelName() always returned null and every history row
+// stored map:"" — that is why the Matches tab's map column is empty.
+// mappool.js records the level it actually loaded in `currentMapName` (z_trace
+// already reads it for the heatmap), so use that — and CAPTURE IT AT GAME
+// START: by the time a game ends the rotation has already advanced
+// currentMapName to the next map, which would label every game with its
+// successor.
+function statsMapNameNow() {
+    var n = (typeof currentMapName === 'string' && currentMapName) ? currentMapName : null;
+    if (!n) n = statsCurrentLevelName();
+    if (!n || n.indexOf('random#') === 0) return '';   // sub-pool pick unresolved
+    return n;
+}
+function statsCaptureMap() {
+    if (statsMapRetry) { clearInterval(statsMapRetry); statsMapRetry = null; }
+    statsGameMap = statsMapNameNow();
+    if (statsGameMap) return;
+    // A sub-pool entry ("random#<url>") resolves asynchronously after the load.
+    // The pool does not advance again until this game ends, so a few retries
+    // settle on the real name without ever picking up the NEXT map.
+    var tries = 0;
+    statsMapRetry = setInterval(function () {
+        var nm = statsMapNameNow();
+        if (nm) statsGameMap = nm;
+        if (nm || ++tries >= 4) { clearInterval(statsMapRetry); statsMapRetry = null; }
+    }, 2000);
 }
 function statsSafeKey(s) { return String(s).replace(/[.#$/\[\]]/g, '_').slice(0, 120); }
 
